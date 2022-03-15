@@ -19,6 +19,6 @@ COPY webhooks webhooks
 # Build the controller
 RUN go build -mod=vendor -o bin/controller main.go
 
-FROM registry.access.redhat.com/ubi8/ubi-micro:latest
+FROM registry.access.redhat.com/ubi8/ubi-minimal:latest
 COPY --from=builder /workspace/bin/controller /usr/bin/controller
 ENTRYPOINT ["/usr/bin/controller"]
