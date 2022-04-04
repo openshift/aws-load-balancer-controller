@@ -1,65 +1,117 @@
-# Copyright 2017 The Kubernetes Authors All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
-# Usage:
-# 	[IMG_REPO=gcr.io/google_containers/dummy-ingress-controller] [TAG=v1.0.0] make (compile|lint|unit-test|e2e-test|docs-serve|docs-deploy)
+MAKEFILE_PATH = $(dir $(realpath -s $(firstword $(MAKEFILE_LIST))))
 
-GOOS?=linux
-GOARCH?=amd64
-GOBIN:=$(shell pwd)/.bin
+# Image URL to use all building/pushing image targets
+IMG ?= amazon/aws-alb-ingress-controller:v2.4.1
 
-IMG_REPO?=amazon/aws-alb-ingress-controller
-IMG_TAG?=v1.1.9
-GIT_REPO=$(shell git config --get remote.origin.url)
-GIT_COMMIT=$(shell git rev-parse --short HEAD)
+CRD_OPTIONS ?= "crd:crdVersions=v1"
+
+# Whether to override AWS SDK models. set to 'y' when we need to build against custom AWS SDK models.
+AWS_SDK_MODEL_OVERRIDE ?= "n"
+
+# Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
+ifeq (,$(shell go env GOBIN))
+GOBIN=$(shell go env GOPATH)/bin
+else
+GOBIN=$(shell go env GOBIN)
+endif
+
+all: controller
+
+# Run tests
+test: generate fmt vet manifests helm-lint
+	go test -race ./pkg/... ./webhooks/... -coverprofile cover.out
+
+# Build controller binary
+controller: generate fmt vet
+	go build -o bin/controller main.go
+
+# Run against the configured Kubernetes cluster in ~/.kube/config
+run: generate fmt vet manifests
+	go run ./main.go
+
+# Install CRDs into a cluster
+install: manifests
+	kustomize build config/crd | kubectl apply -f -
+
+# Uninstall CRDs from a cluster
+uninstall: manifests
+	kustomize build config/crd | kubectl delete -f -
+
+# Deploy controller in the configured Kubernetes cluster in ~/.kube/config
+deploy: manifests
+	cd config/controller && kustomize edit set image controller=${IMG}
+	kustomize build config/default | kubectl apply -f -
+
+# Generate manifests e.g. CRD, RBAC etc.
+manifests: controller-gen
+	$(CONTROLLER_GEN) $(CRD_OPTIONS) rbac:roleName=controller-role webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	yq eval '.metadata.name = "webhook"' -i config/webhook/manifests.yaml
+
+# Run go fmt against code
+fmt:
+	go fmt ./...
+
+# Run go vet against code
+vet:
+	go vet ./...
+
+helm-lint:
+	${MAKEFILE_PATH}/test/helm/helm-lint.sh
+
+# Generate code
+generate: aws-sdk-model-override controller-gen
+	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
+
+aws-sdk-model-override:
+	@if [ "$(AWS_SDK_MODEL_OVERRIDE)" = "y" ] ; then \
+		./scripts/aws_sdk_model_override/setup.sh ; \
+	else \
+		./scripts/aws_sdk_model_override/cleanup.sh ; \
+	fi
 
 
-VERSION_PKG=github.com/kubernetes-sigs/aws-alb-ingress-controller/version
-VERSION_LD_FLAGS=-X $(VERSION_PKG).RELEASE=$(IMG_TAG) -X $(VERSION_PKG).REPO=$(GIT_REPO) -X $(VERSION_PKG).COMMIT=$(GIT_COMMIT)
-COMPILE_OUTPUT?=controller
-
-all: compile
-
-.PHONY: compile
-compile:
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags="-s -w $(VERSION_LD_FLAGS)" -a -installsuffix cgo  -o ${COMPILE_OUTPUT} ./cmd
-
-.PHONY: lint
-lint:
-	GOBIN=$(GOBIN) go install -v github.com/golangci/golangci-lint/cmd/golangci-lint
-	$(GOBIN)/golangci-lint run --deadline=10m
-
-.PHONY: unit-test
-unit-test:
-	GOBIN=$(GOBIN) ./scripts/ci_unit_test.sh
-
-.PHONY: e2e-test
-e2e-test:
-	GOBIN=$(GOBIN) go get github.com/aws/aws-k8s-tester/e2e/tester/cmd/k8s-e2e-tester@master
-	GOBIN=$(GOBIN) TESTCONFIG=./tester/test-config.yaml ${GOBIN}/k8s-e2e-tester
-
-test: lint unit-test
-
-# build & preview docs
-docs-serve:
-	pipenv install && pipenv run mkdocs serve
-# deploy docs to github-pages(gh-pages branch)
-docs-deploy:
-	pipenv install && pipenv run mkdocs gh-deploy
-
-release:
+# Push the docker image
+docker-push:
 	docker buildx build . --target bin \
-		--tag $(IMG_REPO):$(IMG_TAG) \
-		--push \
-		--platform linux/amd64,linux/arm64
+        		--tag $(IMG) \
+        		--push \
+        		--platform linux/amd64,linux/arm64
+
+# find or download controller-gen
+# download controller-gen if necessary
+controller-gen:
+ifeq (, $(shell which controller-gen))
+	@{ \
+	set -e ;\
+	CONTROLLER_GEN_TMP_DIR=$$(mktemp -d) ;\
+	cd $$CONTROLLER_GEN_TMP_DIR ;\
+	go mod init tmp ;\
+	go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.5.0 ;\
+	rm -rf $$CONTROLLER_GEN_TMP_DIR ;\
+	}
+CONTROLLER_GEN=$(GOBIN)/controller-gen
+else
+CONTROLLER_GEN=$(shell which controller-gen)
+endif
+
+# preview docs
+docs-preview: docs-dependencies
+	pipenv run mkdocs serve
+
+# publish the versioned docs using mkdocs mike util
+docs-publish: docs-dependencies
+	pipenv run mike deploy v2.4 latest -p --update-aliases
+
+# install dependencies needed to preview and publish docs
+docs-dependencies:
+	pipenv install --dev
+
+lint:
+	echo "TODO"
+
+unit-test:
+	./scripts/ci_unit_test.sh
+
+e2e-test:
+	./scripts/ci_e2e_test.sh

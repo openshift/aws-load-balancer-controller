@@ -1,199 +1,271 @@
 #!/usr/bin/env bash
 
 set -ueo pipefail
+set -x
 
+# shellcheck source=lib/iam.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/iam.sh"
+# shellcheck source=lib/ecr.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/ecr.sh"
+# shellcheck source=lib/eksctl.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/eksctl.sh"
+
+# CI/CD environment
 # If running in PROW, BUILD_ID will be the prow build ID.
 BUILD_ID=${BUILD_ID:-"$RANDOM"}
 PULL_NUMBER=${PULL_NUMBER:-"0"}
+AWS_REGION=${AWS_DEFAULT_REGION:-"us-west-2"}
 
-AWS_REGION=${AWS_REGION:-"us-west-2"}
+# Controller settings
+LOCAL_GIT_VERSION=$(git describe --tags --always --dirty)
+CONTROLLER_IMAGE_TAG=$LOCAL_GIT_VERSION
+CONTROLLER_IMAGE_REPO="amazon/aws-load-balancer-controller"
+CONTROLLER_IMAGE_NAME="" # will be fulfilled during build_push_controller_image
 
-# Materials used to install ALB Ingress Controller.
-RAW_CONTROLLER_POLICY_JSON="./docs/examples/iam-policy.json"
-RAW_CONTROLLER_RBAC_YAML="./docs/examples/rbac-role.yaml"
-RAW_CONTROLLER_DEPLOYMENT_YAML="./docs/examples/alb-ingress-controller.yaml"
+CONTROLLER_SA_NAMESPACE="kube-system"
+CONTROLLER_SA_NAME="aws-load-balancer-controller"
+CONTROLLER_IAM_POLICY_FILE="$(dirname "${BASH_SOURCE[0]}")/../docs/install/iam_policy.json"
+CONTROLLER_IAM_POLICY_NAME="lb-controller-e2e-${PULL_NUMBER}-$BUILD_ID"
+CONTROLLER_IAM_POLICY_ARN="" # will be fulfilled during setup_controller_iam_sa
 
+# Cluster settings
+EKSCTL_VERSION="v0.77.0"
+CLUSTER_NAME="lb-controller-e2e-${PULL_NUMBER}-$BUILD_ID"
+CLUSTER_VERSION=${CLUSTER_VERSION:-"1.19"}
+CLUSTER_INSTANCE_TYPE="m5.xlarge"
+CLUSTER_NODE_COUNT="4"
+CLUSTER_KUBECONFIG=${CLUSTER_KUBECONFIG:-"/tmp/lb-controller-e2e/clusters/${CLUSTER_NAME}.kubeconfig"}
 
-# TODO(@M00nF1sh): rewrite whole script using python :(
-# Globals to hold created resources.
-CONTROLLER_POLICY_ARN=""
-CONTROLLER_IMAGE_NAME=""
-
-
-source $(dirname "${BASH_SOURCE}")/utils/cluster.sh
-source $(dirname "${BASH_SOURCE}")/utils/ecr.sh
+HELM_DIR="$(cd $(dirname "${BASH_SOURCE[0]}")/../helm ; pwd)"
 
 #######################################
-# Install IAM Policy AWS ALB Ingress Controller into current cluster.
-# Globals:
-#   RAW_CONTROLLER_POLICY_JSON
-#   CONTROLLER_POLICY_ARN
-# Arguments:
-#   cluster_name
+# Build and push ECR image for AWS Load Balancer Controller
 #
-#######################################
-install_alb_ingress_policy() {
-    declare -r cluster_name="$1"
-
-    local policy_name="alb-ingress-controller-$cluster_name"
-    echo "Creating iam policy $policy_name"
-    CONTROLLER_POLICY_ARN=$(aws iam create-policy --region=$AWS_REGION --policy-name "$policy_name" --policy-document "file://$RAW_CONTROLLER_POLICY_JSON" --query "Policy.Arn" | sed 's/"//g')
-    if [[ $? -ne 0 ]]; then
-        echo "Unable to create iam policy $policy_name" >&2
-        return 1
-    fi
-
-    local kops_node_role_name="nodes.${cluster_name}"
-    echo "Attaching iam policy $CONTROLLER_POLICY_ARN to $kops_node_role_name"
-    if ! aws iam attach-role-policy --region=$AWS_REGION --role-name=$kops_node_role_name --policy-arn=$CONTROLLER_POLICY_ARN; then
-        echo "Unable to attach iam policy $CONTROLLER_POLICY_ARN to $kops_node_role_name" >&2
-        return 1
-    fi
-
-    return 0
-}
-
-#######################################
-# Uninstall IAM Policy AWS ALB Ingress Controller from current cluster.
 # Globals:
-#   None
-# Arguments:
-#   cluster_name
-#   policy_arn
-#
-#######################################
-uninstall_alb_ingress_policy() {
-    declare -r cluster_name="$1" policy_arn="$2"
-
-    if [[ ! -z "$policy_arn" ]]; then
-        local kops_node_role_name="nodes.${cluster_name}"
-        echo "Detaching iam policy $policy_arn from $kops_node_role_name"
-        if ! aws iam detach-role-policy --region=$AWS_REGION --role-name=$kops_node_role_name --policy-arn=$policy_arn; then
-            echo "Unable to detach iam policy $policy_arn from $kops_node_role_name" >&2
-        fi
-
-        echo "Deleting iam policy $policy_arn"
-        if ! aws iam delete-policy --region=$AWS_REGION --policy-arn "$policy_arn"; then
-            echo "Unable to delete iam policy $policy_arn" >&2
-            return 1
-        fi
-    fi
-
-    return 0
-}
-
-#######################################
-# Install AWS ALB Ingress Controller into current cluster.
-# Globals:
-#   RAW_CONTROLLER_RBAC_YAML
-#   RAW_CONTROLLER_DEPLOYMENT_YAML
-# Arguments:
-#   cluster_name
-#   controller_image
-#
-#######################################
-install_alb_ingress_controller() {
-    declare -r cluster_name="$1" controller_image="$2"
-
-    local controller_yaml="./controller.yaml"
-    local controller_image_escaped=$(echo $controller_image | sed 's/\//\\\//g')
-    if ! cat "$RAW_CONTROLLER_DEPLOYMENT_YAML" | \
-        sed "s/# - --cluster-name=devCluster/- --cluster-name=$cluster_name/g" | \
-        sed "s/image: docker.io\/amazon\/aws-alb-ingress-controller:.*/image: $controller_image_escaped/g" > "$controller_yaml"; then
-        echo "Unable to init controller YAML for AWS ALB Ingress Controller" >&2
-        return 1
-    fi
-
-    echo "Installing AWS ALB Ingress Controller"
-    if ! cluster::apply $RAW_CONTROLLER_RBAC_YAML $controller_yaml; then
-        echo "Unable to Installing AWS ALB Ingress Controller" >&2
-        return 1
-    fi
-
-    return 0
-}
-
-#######################################
-# Install AWS ALB Ingress Controller into current cluster.
-# Globals:
-#   PULL_NUMBER
+#   AWS_REGION
+#   CONTROLLER_IMAGE_REPO
+#   CONTROLLER_IMAGE_TAG
+#   CONTROLLER_IMAGE_NAME
 # Arguments:
 #   None
-#
 #######################################
 build_push_controller_image() {
-    CONTROLLER_IMAGE_NAME=$(ecr::name_image "aws-alb-ingress-controller" "pr-$PULL_NUMBER")
-    if [[ $? -ne 0 ]]; then
-        echo "Unable to name aws-alb-ingress-controller image" >&2
-        return 1
-    fi
+  if ! ecr::ensure_repository "${CONTROLLER_IMAGE_REPO}" "${AWS_REGION}"; then
+    echo "unable to ensure ECR image repository" >&2
+    return 1
+  fi
 
-    echo "Building aws-alb-ingress-controller image"
-    if ! DOCKER_CLI_EXPERIMENTAL=enabled docker buildx build -t "$CONTROLLER_IMAGE_NAME" ./; then
-        echo "Unable to build aws-alb-ingress-controller image" >&2
-        return 1
-    fi
+  if ! ecr::login_repository "${CONTROLLER_IMAGE_REPO}" "${AWS_REGION}"; then
+    echo "unable to login ECR image repository" >&2
+    return 1
+  fi
 
-    echo "Pushing aws-alb-ingress-controller image as $CONTROLLER_IMAGE_NAME"
-    if ! ecr::push_image "$CONTROLLER_IMAGE_NAME"; then
-     echo "Unable to push aws-alb-ingress-controller image" >&2
-        return 1
-    fi
+  CONTROLLER_IMAGE_NAME=$(ecr::name_image "${CONTROLLER_IMAGE_REPO}" "${CONTROLLER_IMAGE_TAG}" "${AWS_REGION}")
+  if [[ $? -ne 0 ]]; then
+    echo "unable to compute image name" >&2
+    return 1
+  fi
 
+  if ecr::contains_image "${CONTROLLER_IMAGE_REPO}" "${CONTROLLER_IMAGE_TAG}" "${AWS_REGION}"; then
+    echo "docker image ${CONTROLLER_IMAGE_REPO}:${CONTROLLER_IMAGE_TAG} already exists in ECR image repository. Skipping image build..."
     return 0
+  fi
+
+  echo "build and push docker image ${CONTROLLER_IMAGE_NAME}"
+  DOCKER_CLI_EXPERIMENTAL=enabled docker buildx create --use
+  DOCKER_CLI_EXPERIMENTAL=enabled docker buildx inspect --bootstrap
+
+  # TODO: the first buildx build sometimes fails on new created builder instance.
+  #  figure out why and remove this retry.
+  n=0
+  until [ "$n" -ge 2 ]; do
+    DOCKER_CLI_EXPERIMENTAL=enabled docker buildx build . --target bin \
+      --tag "${CONTROLLER_IMAGE_NAME}" \
+      --push \
+      --progress plain \
+      --platform linux/amd64 && break
+    n=$((n + 1))
+    sleep 2
+  done
+
+  if [[ $? -ne 0 ]]; then
+    echo "unable to build and push docker image" >&2
+    return 1
+  fi
+
+  return 0
 }
 
-setup() {
-    declare -r cluster_name="$1"
+#######################################
+# Setup test cluster
+# Globals:
+#   AWS_REGION
+#   EKSCTL_VERSION
+#   CLUSTER_NAME
+#   CLUSTER_VERSION
+#   CLUSTER_INSTANCE_TYPE
+#   CLUSTER_NODE_COUNT
+#   CLUSTER_KUBECONFIG
+# Arguments:
+#   None
+#######################################
+setup_cluster() {
+  if ! eksctl::init "${EKSCTL_VERSION}"; then
+    echo "unable to init eksctl" >&2
+    return 1
+  fi
 
-    build_push_controller_image
+  if ! eksctl::create_cluster "${CLUSTER_NAME}" "${AWS_REGION}" "${CLUSTER_VERSION}" "${CLUSTER_INSTANCE_TYPE}" "${CLUSTER_NODE_COUNT}" "${CLUSTER_KUBECONFIG}"; then
+    echo "unable to create cluster ${CLUSTER_NAME}" >&2
+    return 1
+  fi
 
-    if ! cluster::init_KOPS 1.11.0; then
-        echo "Unable to init kops" >&2
-        exit 1
-    fi
-
-    if ! cluster::create $cluster_name 1.13.0 t3.medium 3; then
-        echo "Unable to create cluster" >&2
-        exit 1
-    fi
-
-    if ! install_alb_ingress_policy $cluster_name; then
-        echo "Unable to install_alb_ingress_policy" >&2
-        exit 1
-    fi
-
-    if ! install_alb_ingress_controller $cluster_name $CONTROLLER_IMAGE_NAME; then
-        echo "Unable to install_alb_ingress_controller" >&2
-        exit 1
-    fi
+  return 0
 }
 
+#######################################
+# Cleanup test cluster
+# Globals:
+#   AWS_REGION
+#   CLUSTER_NAME
+# Arguments:
+#   None
+#
+#######################################
+cleanup_cluster() {
+  if ! eksctl::delete_cluster "${CLUSTER_NAME}" "${AWS_REGION}"; then
+    echo "unable to delete cluster ${CLUSTER_NAME}" >&2
+    return 1
+  fi
+}
+
+#######################################
+# Setup IAM role and Service Account for AWS Load Balancer Controller
+#
+# Globals:
+#   AWS_REGION
+#   CLUSTER_NAME
+#   CONTROLLER_SA_NAMESPACE
+#   CONTROLLER_SA_NAME
+#   CONTROLLER_IAM_POLICY_NAME
+#   CONTROLLER_IAM_POLICY_FILE
+#   CONTROLLER_IAM_POLICY_ARN
+# Arguments:
+#   None
+#######################################
+setup_controller_iam_sa() {
+  if [[ -z "${CONTROLLER_IAM_POLICY_ARN}" ]]; then
+    echo "creating IAM policy for controller"
+
+    CONTROLLER_IAM_POLICY_ARN=$(iam::create_policy "${CONTROLLER_IAM_POLICY_NAME}" "${CONTROLLER_IAM_POLICY_FILE}" "${AWS_REGION}")
+    if [[ $? -ne 0 ]]; then
+      echo "unable to create IAM policy for controller" >&2
+      return 1
+    fi
+
+    echo "created IAM policy for controller: ${CONTROLLER_IAM_POLICY_ARN}"
+  fi
+
+  if ! eksctl::create_iamserviceaccount "${CLUSTER_NAME}" "${AWS_REGION}" "${CONTROLLER_SA_NAMESPACE}" "${CONTROLLER_SA_NAME}" "${CONTROLLER_IAM_POLICY_ARN}"; then
+    echo "unable to create IAM role and service account for controller" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+#######################################
+# Cleanup IAM role and Service Account for AWS Load Balancer Controller
+#
+# Globals:
+#   AWS_REGION
+#   CONTROLLER_IAM_POLICY_ARN
+# Arguments:
+#   None
+#######################################
+cleanup_controller_iam_sa() {
+  if [[ -n "${CONTROLLER_IAM_POLICY_ARN}" ]]; then
+    echo "deleting IAM policy for controller"
+
+    if ! iam::delete_policy "${CONTROLLER_IAM_POLICY_ARN}" "${AWS_REGION}"; then
+      echo "unable to delete IAM policy for controller" >&2
+      return 1
+    fi
+
+    echo "deleted IAM policy for controller: ${CONTROLLER_IAM_POLICY_ARN}"
+  fi
+}
+
+#######################################
+# Test ECR image for AWS Load Balancer Controller
+# Globals:
+#   AWS_REGION
+#   CLUSTER_NAME
+#   CLUSTER_KUBECONFIG
+#   CONTROLLER_IMAGE_NAME
+#   CONTROLLER_SA_NAMESPACE
+#   CONTROLLER_SA_NAME
+# Arguments:
+#   None
+#######################################
+test_controller_image() {
+  local cluster_vpc_id
+  cluster_vpc_id=$(eksctl::get_cluster_vpc_id "${CLUSTER_NAME}" "${AWS_REGION}")
+  if [[ $? -ne 0 ]]; then
+    echo "unable to get cluster vpc id" >&2
+    return 1
+  fi
+
+  AWS_ACCOUNT_ID=$(aws sts get-caller-identity --region ${AWS_REGION} --query Account --output text)
+  S3_BUCKET=${S3_BUCKET:-"lb-controller-e2e-${AWS_ACCOUNT_ID}"}
+  CERTIFICATE_ARN_PREFIX=arn:aws:acm:${AWS_REGION}:${AWS_ACCOUNT_ID}:certificate
+  CERT_ID1="7caec311-1e1f-4b04-a061-bfa688fe813f"
+  CERT_ID2="724963dd-f571-4f2c-b549-5c7d0e35e4b8"
+  CERT_ID3="1001570b-1779-40c3-9b49-9a9a41e30058"
+  CERTIFICATE_ARNS=${CERTIFICATE_ARNS:-"${CERTIFICATE_ARN_PREFIX}/${CERT_ID1},${CERTIFICATE_ARN_PREFIX}/${CERT_ID2},${CERTIFICATE_ARN_PREFIX}/${CERT_ID3}"}
+
+  ginkgo -v -r test/e2e -- \
+    --kubeconfig=${CLUSTER_KUBECONFIG} \
+    --cluster-name=${CLUSTER_NAME} \
+    --aws-region=${AWS_REGION} \
+    --aws-vpc-id=${cluster_vpc_id} \
+    --helm-chart=${HELM_DIR}/aws-load-balancer-controller \
+    --controller-image=${CONTROLLER_IMAGE_NAME} \
+    --s3-bucket-name=${S3_BUCKET} \
+    --certificate-arns=${CERTIFICATE_ARNS}
+}
+
+#######################################
+# Cleanup resources
+# Globals:
+#   None
+# Arguments:
+#   None
+#######################################
 cleanup() {
-    declare -r cluster_name="$1"
-
-    if ! uninstall_alb_ingress_policy $cluster_name $CONTROLLER_POLICY_ARN; then
-        echo "Unable to uninstall_alb_ingress_policy" >&2
-    fi
-
-    if ! cluster::delete $cluster_name; then
-        echo "Unable to delete cluster" >&2
-    fi
+  sleep 60
+  cleanup_cluster
+  cleanup_controller_iam_sa
 }
 
-test() {
-    declare -r cluster_name="$1"
-    vpc_id=$(aws ec2 describe-vpcs --region=$AWS_REGION --filters Name=tag-key,Values=kubernetes.io/cluster/$cluster_name --query 'Vpcs[0].VpcId' | sed 's/"//g')
-    go get -u github.com/onsi/ginkgo/ginkgo
-    $(go env GOBIN)/ginkgo -v test/e2e/  -- --kubeconfig=$HOME/.kube/config --cluster-name=$cluster_name --aws-region=$AWS_REGION --aws-vpc-id=$vpc_id
-}
-
+#######################################
+# Entry point
+# Globals:
+#   IMAGE_REPO_APP_MESH_CONTROLLER
+#   IMAGE_TAG
+# Arguments:
+#   None
+#
+#######################################
 main() {
-    local cluster_name="alb-ingress-e2e-${BUILD_ID}.k8s.local"
+  build_push_controller_image
 
-    trap "cleanup $cluster_name" EXIT
-    setup $cluster_name
-    test $cluster_name
+  go install github.com/mikefarah/yq/v4@v4.6.1
+  go install github.com/onsi/ginkgo/ginkgo@v1.15.1
+  trap "cleanup" EXIT
+  setup_cluster
+  setup_controller_iam_sa
+  test_controller_image
 }
 
-main $@
+main "$@"

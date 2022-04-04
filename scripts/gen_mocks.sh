@@ -1,23 +1,19 @@
-#!/usr/bin/env bash
-# This shell script is used to generate & update mock objects for testing
-mockery -name CloudAPI -dir ./internal/aws/
-mockery -name Storer -dir ./internal/ingress/controller/store/ -inpkg
-
-mockery -name Controller -dir ./internal/alb/tags/ -inpkg
-mockery -name Controller -dir ./internal/alb/ls/ -inpkg
-mockery -name RulesController -dir ./internal/alb/ls/ -inpkg
-
-mockery -name ACMAPI -dir ./vendor/github.com/aws/aws-sdk-go/service/acm/acmiface
-mockery -name EC2API -dir ./vendor/github.com/aws/aws-sdk-go/service/ec2/ec2iface
-mockery -name ELBV2API -dir ./vendor/github.com/aws/aws-sdk-go/service/elbv2/elbv2iface
-mockery -name IAMAPI -dir ./vendor/github.com/aws/aws-sdk-go/service/iam/iamiface
-mockery -name ResourceGroupsTaggingAPIAPI -dir ./vendor/github.com/aws/aws-sdk-go/service/resourcegroupstaggingapi/resourcegroupstaggingapiiface
-mockery -name WAFRegionalAPI -dir ./vendor/github.com/aws/aws-sdk-go/service/wafregional/wafregionaliface
-mockery -name WAFV2API -dir ./vendor/github.com/aws/aws-sdk-go/service/wafv2/wafv2iface
-mockery -name ShieldAPI -dir ./vendor/github.com/aws/aws-sdk-go/service/shield/shieldiface
-
-
-
-mockgen -destination=./mocks/aws-alb-ingress-controller/ingress/auth/mock.go github.com/kubernetes-sigs/aws-alb-ingress-controller/internal/ingress/auth Module
-mockgen -destination=./mocks/controller-runtime/cache/mock.go sigs.k8s.io/controller-runtime/pkg/cache Cache
-mockgen -destination=./mocks/controller-runtime/controller/mock.go sigs.k8s.io/controller-runtime/pkg/controller Controller
+## Note: mocks for interfaces from this project should be along with the original package.
+##       mocks for interfaces from 3rd-party project should be put inside ./mocks folder.
+## mockgen version v1.5.0
+~/go/bin/mockgen -package=mock_client -destination=./mocks/controller-runtime/client/client_mocks.go sigs.k8s.io/controller-runtime/pkg/client Client
+~/go/bin/mockgen -package=services -destination=./pkg/aws/services/elbv2_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/aws/services ELBV2
+~/go/bin/mockgen -package=services -destination=./pkg/aws/services/ec2_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/aws/services EC2
+~/go/bin/mockgen -package=services -destination=./pkg/aws/services/shield_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/aws/services Shield
+~/go/bin/mockgen -package=webhook -destination=./pkg/webhook/mutator_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/webhook Mutator
+~/go/bin/mockgen -package=webhook -destination=./pkg/webhook/validator_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/webhook Validator
+~/go/bin/mockgen -package=k8s -destination=./pkg/k8s/finalizer_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/k8s FinalizerManager
+~/go/bin/mockgen -package=k8s -destination=./pkg/k8s/pod_info_repo_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/k8s PodInfoRepo
+~/go/bin/mockgen -package=networking -destination=./pkg/networking/security_group_manager_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/networking SecurityGroupManager
+~/go/bin/mockgen -package=networking -destination=./pkg/networking/subnet_resolver_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/networking SubnetsResolver
+~/go/bin/mockgen -package=networking -destination=./pkg/networking/az_info_provider_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/networking AZInfoProvider
+~/go/bin/mockgen -package=networking -destination=./pkg/networking/node_info_provider_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/networking NodeInfoProvider
+~/go/bin/mockgen -package=networking -destination=./pkg/networking/vpc_info_provider_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/networking VPCInfoProvider
+~/go/bin/mockgen -package=networking -destination=./pkg/networking/backend_sg_provider_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/networking BackendSGProvider
+~/go/bin/mockgen -package=ingress -destination=./pkg/ingress/cert_discovery_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/ingress CertDiscovery
+~/go/bin/mockgen -package=elbv2 -destination=./pkg/deploy/elbv2/tagging_manager_mocks.go sigs.k8s.io/aws-load-balancer-controller/pkg/deploy/elbv2 TaggingManager

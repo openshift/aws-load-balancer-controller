@@ -1,7 +1,9 @@
 approvers:
-- bigkraig
 - M00nF1sh
+- kishorj
 reviewers:
-- bigkraig
 - M00nF1sh
+- kishorj
+emeritus_approvers:
+- bigkraig
 - alejandrox1

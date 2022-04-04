@@ -3,7 +3,7 @@ kind: ServiceAccount
 metadata:
   name: external-dns
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: external-dns
@@ -14,14 +14,17 @@ rules:
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["get","watch","list"]
-- apiGroups: ["extensions"] 
-  resources: ["ingresses"] 
+- apiGroups: ["extensions"]
+  resources: ["ingresses"]
   verbs: ["get","watch","list"]
 - apiGroups: [""]
   resources: ["nodes"]
   verbs: ["list"]
+- apiGroups: [""]
+  resources: ["endpoints"]
+  verbs: ["get","watch","list"]
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: external-dns-viewer
@@ -50,9 +53,15 @@ spec:
         app: external-dns
     spec:
       serviceAccountName: external-dns
+      securityContext:
+        fsGroup: 65534
       containers:
       - name: external-dns
-        image: bitnami/external-dns:0.7.1
+        image: bitnami/external-dns:0.7.4
+        # must specify env AWS_REGION in AWS china regions
+        # env:
+        # - name: AWS_REGION
+        #   value: cn-north-1
         args:
         - --source=service
         - --source=ingress

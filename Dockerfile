@@ -1,31 +1,33 @@
 # syntax=docker/dockerfile:experimental
 
-FROM --platform=${BUILDPLATFORM} golang:1.15.0 AS base
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN GOPROXY=direct go mod download
+FROM --platform=${TARGETPLATFORM} public.ecr.aws/docker/library/golang:1.17.8 AS base
+WORKDIR /workspace
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
+# cache deps before building and copying source so that we don't need to re-download as much
+# and so that source changes don't invalidate our downloaded layer
+RUN --mount=type=bind,target=. \
+    --mount=type=cache,target=/root/.cache/go-build \
+    GOPROXY=direct go mod download
 
 FROM base AS build
 ARG TARGETOS
 ARG TARGETARCH
+ENV VERSION_PKG=sigs.k8s.io/aws-load-balancer-controller/pkg/version
 RUN --mount=type=bind,target=. \
     --mount=type=cache,target=/root/.cache/go-build \
-    GOOS=${TARGETOS} GOARCH=${TARGETARCH} COMPILE_OUTPUT="/out/controller" make compile
+    GIT_VERSION=$(git describe --tags --dirty --always) && \
+    GIT_COMMIT=$(git rev-parse HEAD) && \
+    BUILD_DATE=$(date +%Y-%m-%dT%H:%M:%S%z) && \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} GO111MODULE=on \
+    CGO_CPPFLAGS="-D_FORTIFY_SOURCE=2" \
+    CGO_LDFLAGS="-Wl,-z,relro,-z,now" \
+    go build -buildmode=pie -tags 'osusergo,netgo,static_build' -ldflags="-s -w -linkmode=external -extldflags '-static-pie' -X ${VERSION_PKG}.GitVersion=${GIT_VERSION} -X ${VERSION_PKG}.GitCommit=${GIT_COMMIT} -X ${VERSION_PKG}.BuildDate=${BUILD_DATE}" -mod=readonly -a -o /out/controller main.go
 
-FROM golangci/golangci-lint:v1.27-alpine AS lint-base
+FROM public.ecr.aws/eks-distro-build-tooling/eks-distro-minimal-base-nonroot:2022-03-09-1646784337.2 as bin-unix
 
-FROM base AS lint
-RUN --mount=type=bind,target=. \
-    --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/root/.cache/golangci-lint \
-    --mount=from=lint-base,src=/usr/bin/golangci-lint,target=/usr/bin/golangci-lint \
-    golangci-lint run --timeout 10m0s ./...
-
-
-FROM amazonlinux:2 as amazonlinux
-FROM scratch AS bin-unix
 COPY --from=build /out/controller /controller
-COPY --from=amazonlinux /etc/ssl/certs/ca-bundle.crt /etc/ssl/certs/
 ENTRYPOINT ["/controller"]
 
 FROM bin-unix AS bin-linux
