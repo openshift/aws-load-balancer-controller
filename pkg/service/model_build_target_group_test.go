@@ -1159,6 +1159,7 @@ func Test_defaultModelBuilder_buildPreserveClientIPFlag(t *testing.T) {
 }
 
 func Test_defaultModelBuilder_buildTargetType(t *testing.T) {
+
 	tests := []struct {
 		testName           string
 		svc                *corev1.Service
