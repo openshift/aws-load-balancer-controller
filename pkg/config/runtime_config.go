@@ -131,5 +131,5 @@ func BuildRuntimeOptions(rtCfg RuntimeConfig, scheme *runtime.Scheme) ctrl.Optio
 func ConfigureWebhookServer(rtCfg RuntimeConfig, mgr ctrl.Manager) {
 	mgr.GetWebhookServer().CertName = rtCfg.WebhookCertName
 	mgr.GetWebhookServer().KeyName = rtCfg.WebhookKeyName
-	mgr.GetWebhookServer().TLSMinVersion = "1.3"
+	mgr.GetWebhookServer().TLSMinVersion = "1.2"
 }
