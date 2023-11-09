@@ -1,11 +1,17 @@
 approvers:
   - Miciah
   - alebedev87
-  - arjunrn
-  - thejasn
+  - gcs278
+  - candita
+  - frobware
+  - rfredette
+  - miheer
 reviewers:
   - Miciah
   - alebedev87
-  - arjunrn
-  - thejasn
+  - gcs278
+  - candita
+  - frobware
+  - rfredette
+  - miheer
 component: Ingress
