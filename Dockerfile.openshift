@@ -15,8 +15,8 @@ COPY pkg pkg
 COPY webhooks webhooks
 
 # Build the controller
-RUN go build -mod=vendor -o controller main.go
+RUN go build -tags strictfipsruntime -mod=vendor -o controller main.go
 
-FROM registry.access.redhat.com/ubi8/ubi-minimal:latest
+FROM registry.redhat.io/rhel8-6-els/rhel:latest
 COPY --from=builder /opt/app-root/src/controller /usr/bin/controller
 ENTRYPOINT ["/usr/bin/controller"]
