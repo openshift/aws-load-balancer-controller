@@ -1,4 +1,6 @@
-# httpexpect [![GoDev](https://img.shields.io/badge/go.dev-reference-007d9c?logo=go&logoColor=white)](https://pkg.go.dev/github.com/gavv/httpexpect/v2) [![Build](https://github.com/gavv/httpexpect/workflows/build/badge.svg)](https://github.com/gavv/httpexpect/actions) [![Coveralls](https://coveralls.io/repos/github/gavv/httpexpect/badge.svg?branch=master)](https://coveralls.io/github/gavv/httpexpect?branch=master) [![GitHub release](https://img.shields.io/github/tag/gavv/httpexpect.svg)](https://github.com/gavv/httpexpect/releases)
+![](_images/logo.png)
+
+# httpexpect [![GoDev](https://img.shields.io/badge/go.dev-reference-007d9c?logo=go&logoColor=white)](https://pkg.go.dev/github.com/gavv/httpexpect/v2) [![Build](https://github.com/gavv/httpexpect/workflows/build/badge.svg)](https://github.com/gavv/httpexpect/actions) [![Coveralls](https://coveralls.io/repos/github/gavv/httpexpect/badge.svg?branch=master)](https://coveralls.io/github/gavv/httpexpect?branch=master) [![GitHub release](https://img.shields.io/github/tag/gavv/httpexpect.svg)](https://github.com/gavv/httpexpect/tags) [![Discord](https://img.shields.io/discord/1047473005900615780?logo=discord&label=discord&color=blueviolet&logoColor=white)](https://discord.gg/5SCPCuCWA9)
 
 Concise, declarative, and easy to use end-to-end HTTP and REST API testing for Go (golang).
 
@@ -44,13 +46,15 @@ Workflow:
 * Verbose error messages.
 * JSON diff is produced on failure using [`gojsondiff`](https://github.com/yudai/gojsondiff/) package.
 * Failures are reported using [`testify`](https://github.com/stretchr/testify/) (`assert` or `require` package) or standard `testing` package.
+* JSON values are pretty-printed using `encoding/json`, Go values are pretty-printed using [`litter`](https://github.com/sanity-io/litter).
 * Dumping requests and responses in various formats, using [`httputil`](https://golang.org/pkg/net/http/httputil/), [`http2curl`](https://github.com/moul/http2curl), or simple compact logger.
 
 ##### Tuning
 
 * Tests can communicate with server via real HTTP client or invoke `net/http` or [`fasthttp`](https://github.com/valyala/fasthttp/) handler directly.
-* Custom HTTP client, logger, printer, and failure reporter may be provided by user.
-* Custom HTTP request factory may be provided, e.g. from the Google App Engine testing.
+* User can provide custom HTTP client, WebSocket dialer, HTTP request factory (e.g. from the Google App Engine testing).
+* User can configure formatting options or provide custom templates based on `text/template` engine.
+* Custom handlers may be provided for logging, printing requests and responses, handling succeeded and failed assertions.
 
 ## Versions
 
@@ -73,6 +77,12 @@ import "gopkg.in/gavv/httpexpect.v2"
 ## Documentation
 
 Documentation is available on [pkg.go.dev](https://pkg.go.dev/github.com/gavv/httpexpect/v2#section-documentation). It contains an overview and reference.
+
+## Community
+
+Community forum and Q&A board is right on GitHub in [discussions tab](https://github.com/gavv/httpexpect/discussions).
+
+For more interactive discussion, you can join [discord chat](https://discord.gg/5SCPCuCWA9).
 
 ## Examples
 
@@ -130,7 +140,7 @@ func TestFruits(t *testing.T) {
 	defer server.Close()
 
 	// create httpexpect instance
-	e := httpexpect.New(t, server.URL)
+	e := httpexpect.Default(t, server.URL)
 
 	// is it working?
 	e.GET("/fruits").
@@ -264,7 +274,7 @@ t := time.Now()
 
 e.GET("/users/john").
 	Expect().
-	Status(http.StatusOK).Header("Date").DateTime().InRange(t, time.Now())
+	Status(http.StatusOK).Header("Date").AsDateTime().InRange(t, time.Now())
 ```
 
 ##### Cookies
@@ -382,7 +392,7 @@ ws.CloseWithText("bye").
 ##### Reusable builders
 
 ```go
-e := httpexpect.New(t, "http://example.com")
+e := httpexpect.Default(t, "http://example.com")
 
 r := e.POST("/login").WithForm(Login{"ford", "betelgeuse7"}).
 	Expect().
@@ -406,7 +416,7 @@ e.GET("/restricted").
 ##### Reusable matchers
 
 ```go
-e := httpexpect.New(t, "http://example.com")
+e := httpexpect.Default(t, "http://example.com")
 
 // every response should have this header
 m := e.Matcher(func (resp *httpexpect.Response) {
@@ -425,7 +435,7 @@ m.GET("/bad-path").
 ##### Request transformers
 
 ```go
-e := httpexpect.New(t, "http://example.com")
+e := httpexpect.Default(t, "http://example.com")
 
 myTranform := func(r* http.Request) {
 	// modify the underlying http.Request
@@ -447,25 +457,53 @@ myBuilder.POST("/some-path").
 	Status(http.StatusOK)
 ```
 
+##### Shared environment
+
+```go
+e := httpexpect.Default(t, "http://example.com")
+
+t.Run("/users", func(t *testing.T) {
+	obj := e.GET("/users").
+		Expect().
+		Status(http.StatusOK).JSON().Object()
+
+	// store user id for next tests
+	userID := obj.Path("$.users[1].id").String().Raw()
+	e.Env().Put("user1.id", userID)
+})
+
+t.Run("/user/{userId}", func(t *testing.T) {
+	// read user id from previous tests
+	userID := e.Env().GetString("user1.id")
+
+	e.GET("/user/{userId}").
+		WithPath("userId", userID)
+		Expect().
+		Status(http.StatusOK)
+})
+```
+
 ##### Custom config
 
 ```go
 e := httpexpect.WithConfig(httpexpect.Config{
+	// include test name in failures (optional)
+	TestName: t.Name(),
+
 	// prepend this url to all requests
 	BaseURL: "http://example.com",
 
 	// use http.Client with a cookie jar and timeout
 	Client: &http.Client{
-		Jar:     httpexpect.NewJar(),
+		Jar:     httpexpect.NewCookieJar(),
 		Timeout: time.Second * 30,
 	},
 
 	// use fatal failures
 	Reporter: httpexpect.NewRequireReporter(t),
 
-	// use verbose logging
+	// print all requests and responses
 	Printers: []httpexpect.Printer{
-		httpexpect.NewCurlPrinter(t),
 		httpexpect.NewDebugPrinter(t, true),
 	},
 })
@@ -475,7 +513,7 @@ e := httpexpect.WithConfig(httpexpect.Config{
 
 ```go
 // invoke http.Handler directly using httpexpect.Binder
-var handler http.Handler = MyHandler()
+var handler http.Handler = myHandler()
 
 e := httpexpect.WithConfig(httpexpect.Config{
 	// prepend this url to all requests, required for cookies
@@ -484,7 +522,7 @@ e := httpexpect.WithConfig(httpexpect.Config{
 	Reporter: httpexpect.NewAssertReporter(t),
 	Client: &http.Client{
 		Transport: httpexpect.NewBinder(handler),
-		Jar:       httpexpect.NewJar(),
+		Jar:       httpexpect.NewCookieJar(),
 	},
 })
 
@@ -498,7 +536,7 @@ e := httpexpect.WithConfig(httpexpect.Config{
 	Reporter: httpexpect.NewAssertReporter(t),
 	Client: &http.Client{
 		Transport: httpexpect.NewFastBinder(handler),
-		Jar:       httpexpect.NewJar(),
+		Jar:       httpexpect.NewCookieJar(),
 	},
 })
 ```
@@ -506,7 +544,7 @@ e := httpexpect.WithConfig(httpexpect.Config{
 ##### Per-request client or handler
 
 ```go
-e := httpexpect.New(t, server.URL)
+e := httpexpect.Default(t, server.URL)
 
 client := &http.Client{
 	Transport: &http.Transport{
@@ -525,6 +563,28 @@ e.GET("/path").WithHandler(handler).
 	Status(http.StatusOK)
 ```
 
+##### WebSocket dialer
+
+```go
+// invoke http.Handler directly using websocket.Dialer
+var handler http.Handler = myHandler()
+
+e := httpexpect.WithConfig(httpexpect.Config{
+	BaseURL:         "http://example.com",
+	Reporter:        httpexpect.NewAssertReporter(t),
+	WebsocketDialer: httpexpect.NewWebsocketDialer(handler),
+})
+
+// invoke fasthttp.RequestHandler directly using websocket.Dialer
+var handler fasthttp.RequestHandler = myHandler()
+
+e := httpexpect.WithConfig(httpexpect.Config{
+	BaseURL:         "http://example.com",
+	Reporter:        httpexpect.NewAssertReporter(t),
+	WebsocketDialer: httpexpect.NewFastWebsocketDialer(handler),
+})
+```
+
 ##### Session support
 
 ```go
@@ -532,7 +592,7 @@ e.GET("/path").WithHandler(handler).
 e := httpexpect.WithConfig(httpexpect.Config{
 	Reporter: httpexpect.NewAssertReporter(t),
 	Client: &http.Client{
-		Jar: httpexpect.NewJar(), // used by default if Client is nil
+		Jar: httpexpect.NewCookieJar(), // used by default if Client is nil
 	},
 })
 
@@ -585,6 +645,7 @@ e := httpexpect.WithConfig(httpexpect.Config{
 	},
 })
 ```
+
 ##### Global time-out/cancellation
 
 ```go
@@ -634,10 +695,90 @@ e.POST("/fruits").
 	Status(http.StatusOK)
 ```
 
+##### Printing requests and responses
+
+```go
+// print requests in short form, don't print responses
+e := httpexpect.WithConfig(httpexpect.Config{
+	Reporter: httpexpect.NewAssertReporter(t),
+	Printers: []httpexpect.Printer{
+		httpexpect.NewCompactPrinter(t),
+	},
+})
+
+// print requests as curl commands that can be inserted into terminal
+e := httpexpect.WithConfig(httpexpect.Config{
+	Reporter: httpexpect.NewAssertReporter(t),
+	Printers: []httpexpect.Printer{
+		httpexpect.NewCurlPrinter(t),
+	},
+})
+
+// print requests and responses in verbose form
+// also print all incoming and outgoing websocket messages
+e := httpexpect.WithConfig(httpexpect.Config{
+	Reporter: httpexpect.NewAssertReporter(t),
+	Printers: []httpexpect.Printer{
+		httpexpect.NewDebugPrinter(t, true),
+	},
+})
+```
+
+##### Customize failure formatting
+
+```go
+// customize formatting options
+e := httpexpect.WithConfig(httpexpect.Config{
+	Reporter:  httpexpect.NewAssertReporter(t),
+	Formatter: &httpexpect.DefaultFormatter{
+		DisablePaths: true,
+		DisableDiffs: true,
+	},
+})
+
+// customize formatting template
+e := httpexpect.WithConfig(httpexpect.Config{
+	Reporter:  httpexpect.NewAssertReporter(t),
+	Formatter: &httpexpect.DefaultFormatter{
+		SuccessTemplate: "...",
+		FailureTemplate: "...",
+		TemplateFuncs:   template.FuncMap{ ... },
+	},
+})
+
+// provide custom formatter
+e := httpexpect.WithConfig(httpexpect.Config{
+	Reporter:  httpexpect.NewAssertReporter(t),
+	Formatter: &MyFormatter{},
+})
+```
+
+##### Customize assertion handling
+
+```go
+// enable printing of succeeded assertions
+e := httpexpect.WithConfig(httpexpect.Config{
+	AssertionHandler: &httpexpect.DefaultAssertionHandler{
+		Formatter: &httpexpect.DefaultFormatter{},
+		Reporter:  httpexpect.NewAssertReporter(t),
+		Logger:    t, // specify logger to enable printing of succeeded assertions
+	},
+})
+
+// provide custom assertion handler
+// here you can implement custom handling of succeeded and failed assertions
+// this may be useful for integrating httpexpect with other testing libs
+// if desired, you can completely ignore builtin Formatter, Reporter, and Logger
+e := httpexpect.WithConfig(httpexpect.Config{
+	AssertionHandler: &MyAssertionHandler{},
+})
+```
+
 ## Similar packages
 
 * [`gorequest`](https://github.com/parnurzeal/gorequest)
 * [`baloo`](https://github.com/h2non/baloo)
+* [`apitest`](https://github.com/steinfletcher/apitest)
 * [`gofight`](https://github.com/appleboy/gofight)
 * [`frisby`](https://github.com/verdverm/frisby)
 * [`forest`](https://github.com/emicklei/forest)
@@ -650,22 +791,48 @@ e.POST("/fruits").
 
 Feel free to report bugs, suggest improvements, and send pull requests! Please add documentation and tests for new features.
 
-Build code, run linters, run tests:
+Install developer dependencies:
+
+* [golangci-lint](https://golangci-lint.run/usage/install/#local-installation)
+
+* [stringer](https://github.com/golang/tools)
+
+    `go install golang.org/x/tools/cmd/stringer@latest`
+
+Re-generate, build, lint, and test everything:
 
 ```
-$ make
+make
 ```
 
-Format code:
+Run tests:
 
 ```
-$ make fmt
+make test
+```
+
+Run only short tests:
+
+```
+make short
+```
+
+Run gofmt:
+
+```
+make fmt
+```
+
+Run go generate:
+
+```
+make gen
 ```
 
 Run go mod tidy:
 
 ```
-$ make tidy
+make tidy
 ```
 
 ## License

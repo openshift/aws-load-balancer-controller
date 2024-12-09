@@ -25,11 +25,11 @@ type StackDeployer interface {
 // NewDefaultStackDeployer constructs new defaultStackDeployer.
 func NewDefaultStackDeployer(cloud aws.Cloud, k8sClient client.Client,
 	networkingSGManager networking.SecurityGroupManager, networkingSGReconciler networking.SecurityGroupReconciler,
+	elbv2TaggingManager elbv2.TaggingManager,
 	config config.ControllerConfig, tagPrefix string, logger logr.Logger) *defaultStackDeployer {
 
 	trackingProvider := tracking.NewDefaultProvider(tagPrefix, config.ClusterName)
 	ec2TaggingManager := ec2.NewDefaultTaggingManager(cloud.EC2(), networkingSGManager, cloud.VpcID(), logger)
-	elbv2TaggingManager := elbv2.NewDefaultTaggingManager(cloud.ELBV2(), cloud.VpcID(), config.FeatureGates, logger)
 
 	return &defaultStackDeployer{
 		cloud:                               cloud,
@@ -47,6 +47,7 @@ func NewDefaultStackDeployer(cloud aws.Cloud, k8sClient client.Client,
 		wafv2WebACLAssociationManager:       wafv2.NewDefaultWebACLAssociationManager(cloud.WAFv2(), logger),
 		wafRegionalWebACLAssociationManager: wafregional.NewDefaultWebACLAssociationManager(cloud.WAFRegional(), logger),
 		shieldProtectionManager:             shield.NewDefaultProtectionManager(cloud.Shield(), logger),
+		featureGates:                        config.FeatureGates,
 		vpcID:                               cloud.VpcID(),
 		logger:                              logger,
 	}
@@ -71,6 +72,7 @@ type defaultStackDeployer struct {
 	wafv2WebACLAssociationManager       wafv2.WebACLAssociationManager
 	wafRegionalWebACLAssociationManager wafregional.WebACLAssociationManager
 	shieldProtectionManager             shield.ProtectionManager
+	featureGates                        config.FeatureGates
 	vpcID                               string
 
 	logger logr.Logger
@@ -85,7 +87,7 @@ type ResourceSynthesizer interface {
 func (d *defaultStackDeployer) Deploy(ctx context.Context, stack core.Stack) error {
 	synthesizers := []ResourceSynthesizer{
 		ec2.NewSecurityGroupSynthesizer(d.cloud.EC2(), d.trackingProvider, d.ec2TaggingManager, d.ec2SGManager, d.vpcID, d.logger, stack),
-		elbv2.NewTargetGroupSynthesizer(d.cloud.ELBV2(), d.trackingProvider, d.elbv2TaggingManager, d.elbv2TGManager, d.logger, stack),
+		elbv2.NewTargetGroupSynthesizer(d.cloud.ELBV2(), d.trackingProvider, d.elbv2TaggingManager, d.elbv2TGManager, d.logger, d.featureGates, stack),
 		elbv2.NewLoadBalancerSynthesizer(d.cloud.ELBV2(), d.trackingProvider, d.elbv2TaggingManager, d.elbv2LBManager, d.logger, stack),
 		elbv2.NewListenerSynthesizer(d.cloud.ELBV2(), d.elbv2TaggingManager, d.elbv2LSManager, d.logger, stack),
 		elbv2.NewListenerRuleSynthesizer(d.cloud.ELBV2(), d.elbv2TaggingManager, d.elbv2LRManager, d.logger, stack),

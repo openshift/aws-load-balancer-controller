@@ -38,7 +38,8 @@
                 "elasticloadbalancing:DescribeTargetGroups",
                 "elasticloadbalancing:DescribeTargetGroupAttributes",
                 "elasticloadbalancing:DescribeTargetHealth",
-                "elasticloadbalancing:DescribeTags"
+                "elasticloadbalancing:DescribeTags",
+                "elasticloadbalancing:DescribeTrustStores"
             ],
             "Resource": "*"
         },
@@ -176,6 +177,28 @@
                 "arn:aws-cn:elasticloadbalancing:*:*:listener-rule/net/*/*/*",
                 "arn:aws-cn:elasticloadbalancing:*:*:listener-rule/app/*/*/*"
             ]
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "elasticloadbalancing:AddTags"
+            ],
+            "Resource": [
+                "arn:aws-cn:elasticloadbalancing:*:*:targetgroup/*/*",
+                "arn:aws-cn:elasticloadbalancing:*:*:loadbalancer/net/*/*",
+                "arn:aws-cn:elasticloadbalancing:*:*:loadbalancer/app/*/*"
+            ],
+            "Condition": {
+                "StringEquals": {
+                    "elasticloadbalancing:CreateAction": [
+                        "CreateTargetGroup",
+                        "CreateLoadBalancer"
+                    ]
+                },
+                "Null": {
+                    "aws:RequestTag/elbv2.k8s.aws/cluster": "false"
+                }
+            }
         },
         {
             "Effect": "Allow",

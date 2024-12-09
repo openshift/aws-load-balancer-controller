@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 
 	"github.com/valyala/fasthttp"
 )
@@ -28,9 +30,10 @@ type Binder struct {
 // NewBinder returns a new Binder given a http.Handler.
 //
 // Example:
-//   client := &http.Client{
-//       Transport: NewBinder(handler),
-//   }
+//
+//	client := &http.Client{
+//	    Transport: NewBinder(handler),
+//	}
 func NewBinder(handler http.Handler) Binder {
 	return Binder{Handler: handler}
 }
@@ -43,12 +46,12 @@ func (binder Binder) RoundTrip(origReq *http.Request) (*http.Response, error) {
 		req.Proto = fmt.Sprintf("HTTP/%d.%d", req.ProtoMajor, req.ProtoMinor)
 	}
 
-	if req.Body != nil {
+	if req.Body != nil && req.Body != http.NoBody {
 		if req.ContentLength == -1 {
 			req.TransferEncoding = []string{"chunked"}
 		}
 	} else {
-		req.Body = ioutil.NopCloser(bytes.NewReader(nil))
+		req.Body = http.NoBody
 	}
 
 	if req.URL != nil && req.URL.Scheme == "https" && binder.TLS != nil {
@@ -92,14 +95,17 @@ type FastBinder struct {
 	Handler fasthttp.RequestHandler
 	// TLS connection state used for https:// requests.
 	TLS *tls.ConnectionState
+	// If non-nil, fasthttp.RequestCtx.Logger() will print messages to it.
+	Logger Logger
 }
 
 // NewFastBinder returns a new FastBinder given a fasthttp.RequestHandler.
 //
 // Example:
-//   client := &http.Client{
-//       Transport: NewFastBinder(fasthandler),
-//   }
+//
+//	client := &http.Client{
+//	    Transport: NewFastBinder(fasthandler),
+//	}
 func NewFastBinder(handler fasthttp.RequestHandler) FastBinder {
 	return FastBinder{Handler: handler}
 }
@@ -116,8 +122,23 @@ func (binder FastBinder) RoundTrip(stdreq *http.Request) (*http.Response, error)
 	}
 
 	ctx := fasthttp.RequestCtx{}
-	ctx.Init2(conn, fastLogger{}, true)
+	log := fastLogger{binder.Logger}
+	ctx.Init2(conn, log, true)
+
 	fastreq.CopyTo(&ctx.Request)
+
+	if stdreq.RemoteAddr != "" {
+		var parts = strings.SplitN(stdreq.RemoteAddr, ":", 2)
+		host := parts[0]
+		port := 0
+		if len(parts) > 1 {
+			port, _ = strconv.Atoi(parts[1])
+		}
+		ctx.SetRemoteAddr(&net.TCPAddr{
+			IP:   net.ParseIP(host),
+			Port: port,
+		})
+	}
 
 	if stdreq.ContentLength >= 0 {
 		ctx.Request.Header.SetContentLength(int(stdreq.ContentLength))
@@ -140,9 +161,21 @@ func (binder FastBinder) RoundTrip(stdreq *http.Request) (*http.Response, error)
 
 func std2fast(stdreq *http.Request) *fasthttp.Request {
 	fastreq := &fasthttp.Request{}
+
 	fastreq.SetRequestURI(stdreq.URL.String())
 
+	if stdreq.Proto != "" {
+		fastreq.Header.SetProtocol(stdreq.Proto)
+	} else if stdreq.ProtoMajor != 0 || stdreq.ProtoMinor != 0 {
+		fastreq.Header.SetProtocol(
+			fmt.Sprintf("HTTP/%d.%d", stdreq.ProtoMajor, stdreq.ProtoMinor))
+	}
+
 	fastreq.Header.SetMethod(stdreq.Method)
+
+	if stdreq.Host != "" {
+		fastreq.Header.SetHost(stdreq.Host)
+	}
 
 	for k, a := range stdreq.Header {
 		for n, v := range a {
@@ -164,9 +197,9 @@ func fast2std(stdreq *http.Request, fastresp *fasthttp.Response) *http.Response 
 	body := fastresp.Body()
 
 	stdresp := &http.Response{
-		Request:    stdreq,
 		StatusCode: status,
 		Status:     http.StatusText(status),
+		Request:    stdreq,
 	}
 
 	fastresp.Header.VisitAll(func(k, v []byte) {
@@ -194,10 +227,14 @@ func fast2std(stdreq *http.Request, fastresp *fasthttp.Response) *http.Response 
 	return stdresp
 }
 
-type fastLogger struct{}
+type fastLogger struct {
+	logger Logger
+}
 
-func (fastLogger) Printf(format string, args ...interface{}) {
-	_, _ = format, args
+func (f fastLogger) Printf(format string, args ...interface{}) {
+	if f.logger != nil {
+		f.logger.Logf(format, args...)
+	}
 }
 
 type connNonTLS struct {

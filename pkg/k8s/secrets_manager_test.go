@@ -3,7 +3,9 @@ package k8s
 import (
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -148,9 +150,9 @@ func Test_defaultSecretsManager_MonitorSecrets(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.testName, func(t *testing.T) {
-			secretsEventChan := make(chan event.GenericEvent, 100)
+			secretsEventChan := make(chan event.TypedGenericEvent[*corev1.Secret], 100)
 			fakeClient := fake.NewSimpleClientset()
-			secretsManager := NewSecretsManager(fakeClient, secretsEventChan, &log.NullLogger{})
+			secretsManager := NewSecretsManager(fakeClient, secretsEventChan, logr.New(&log.NullLogSink{}))
 
 			for _, call := range tt.monitorSecretsCall {
 				secretsManager.MonitorSecrets(call.groupID, call.secrets)

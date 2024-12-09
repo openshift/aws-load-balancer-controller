@@ -9,11 +9,62 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"moul.io/http2curl"
+	"moul.io/http2curl/v2"
 )
 
-// CurlPrinter implements Printer. Uses http2curl to dump requests as
-// curl commands.
+// Printer is used to print requests and responses.
+// CompactPrinter, DebugPrinter, and CurlPrinter implement this interface.
+type Printer interface {
+	// Request is called before request is sent.
+	// It is allowed to read and close request body, or ignore it.
+	Request(*http.Request)
+
+	// Response is called after response is received.
+	// It is allowed to read and close response body, or ignore it.
+	Response(*http.Response, time.Duration)
+}
+
+// WebsocketPrinter is used to print writes and reads of WebSocket connection.
+//
+// If WebSocket connection is used, all Printers that also implement WebsocketPrinter
+// are invoked on every WebSocket message read or written.
+//
+// DebugPrinter implements this interface.
+type WebsocketPrinter interface {
+	Printer
+
+	// WebsocketWrite is called before writes to WebSocket connection.
+	WebsocketWrite(typ int, content []byte, closeCode int)
+
+	// WebsocketRead is called after reads from WebSocket connection.
+	WebsocketRead(typ int, content []byte, closeCode int)
+}
+
+// CompactPrinter implements Printer.
+// Prints requests in compact form. Does not print responses.
+type CompactPrinter struct {
+	logger Logger
+}
+
+// NewCompactPrinter returns a new CompactPrinter given a logger.
+func NewCompactPrinter(logger Logger) CompactPrinter {
+	return CompactPrinter{logger}
+}
+
+// Request implements Printer.Request.
+func (p CompactPrinter) Request(req *http.Request) {
+	if req != nil {
+		p.logger.Logf("%s %s", req.Method, req.URL)
+	}
+}
+
+// Response implements Printer.Response.
+func (CompactPrinter) Response(*http.Response, time.Duration) {
+}
+
+// CurlPrinter implements Printer.
+// Uses http2curl to dump requests as curl commands that can be inserted
+// into terminal.
 type CurlPrinter struct {
 	logger Logger
 }
@@ -38,29 +89,9 @@ func (p CurlPrinter) Request(req *http.Request) {
 func (CurlPrinter) Response(*http.Response, time.Duration) {
 }
 
-// CompactPrinter implements Printer. It prints requests in compact form.
-type CompactPrinter struct {
-	logger Logger
-}
-
-// NewCompactPrinter returns a new CompactPrinter given a logger.
-func NewCompactPrinter(logger Logger) CompactPrinter {
-	return CompactPrinter{logger}
-}
-
-// Request implements Printer.Request.
-func (p CompactPrinter) Request(req *http.Request) {
-	if req != nil {
-		p.logger.Logf("%s %s", req.Method, req.URL)
-	}
-}
-
-// Response implements Printer.Response.
-func (CompactPrinter) Response(*http.Response, time.Duration) {
-}
-
-// DebugPrinter implements Printer. Uses net/http/httputil to dump
-// both requests and responses.
+// DebugPrinter implements Printer and WebsocketPrinter.
+// Uses net/http/httputil to dump both requests and responses.
+// Also prints all websocket messages.
 type DebugPrinter struct {
 	logger Logger
 	body   bool
@@ -105,9 +136,9 @@ func (p DebugPrinter) Response(resp *http.Response, duration time.Duration) {
 // WebsocketWrite implements WebsocketPrinter.WebsocketWrite.
 func (p DebugPrinter) WebsocketWrite(typ int, content []byte, closeCode int) {
 	b := &bytes.Buffer{}
-	fmt.Fprintf(b, "-> Sent: %s", wsMessageTypeName(typ))
+	fmt.Fprintf(b, "-> Sent: %s", wsMessageType(typ))
 	if typ == websocket.CloseMessage {
-		fmt.Fprintf(b, " (%d)", closeCode)
+		fmt.Fprintf(b, " %s", wsCloseCode(closeCode))
 	}
 	fmt.Fprint(b, "\n")
 	if len(content) > 0 {
@@ -124,9 +155,9 @@ func (p DebugPrinter) WebsocketWrite(typ int, content []byte, closeCode int) {
 // WebsocketRead implements WebsocketPrinter.WebsocketRead.
 func (p DebugPrinter) WebsocketRead(typ int, content []byte, closeCode int) {
 	b := &bytes.Buffer{}
-	fmt.Fprintf(b, "<- Received: %s", wsMessageTypeName(typ))
+	fmt.Fprintf(b, "<- Received: %s", wsMessageType(typ))
 	if typ == websocket.CloseMessage {
-		fmt.Fprintf(b, " (%d)", closeCode)
+		fmt.Fprintf(b, " %s", wsCloseCode(closeCode))
 	}
 	fmt.Fprint(b, "\n")
 	if len(content) > 0 {

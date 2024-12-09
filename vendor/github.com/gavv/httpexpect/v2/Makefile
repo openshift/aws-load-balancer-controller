@@ -1,7 +1,15 @@
-GO111MODULE := on
-export GO111MODULE
+all: tidy gen build lint test spell
 
-all: build lint test
+tidy:
+	go mod tidy -v
+	cd _examples && go get -v -u github.com/gavv/httpexpect/v2
+	cd _examples && go mod tidy -v
+
+gen:
+	go generate
+
+fmt:
+	gofmt -s -w . ./_examples
 
 build:
 	go build
@@ -11,16 +19,23 @@ lint:
 	golangci-lint run .
 
 test:
+ifneq ($(shell which gotest),)
+	gotest
+	cd _examples && gotest
+else
 	go test
 	cd _examples && go test
+endif
 
-fmt:
-	gofmt -s -w . ./_examples
+short:
+ifneq ($(shell which gotest),)
+	gotest -short
+else
+	go test -short
+endif
 
-tidy:
-	go mod tidy -v
-	mv _examples examples && ( \
-		cd examples ; \
-		go mod tidy -v ; \
-		go get -v -u=patch github.com/gavv/httpexpect ; \
-			) && mv examples _examples
+spell:
+ifneq ($(shell which mdspell),)
+	mdspell -a README.md
+	sort .spelling -o .spelling
+endif

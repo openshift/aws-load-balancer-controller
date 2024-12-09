@@ -1,147 +1,247 @@
 package httpexpect
 
 import (
+	"errors"
 	"reflect"
 )
 
 // Match provides methods to inspect attached regexp match results.
 type Match struct {
-	chain      chain
+	chain      *chain
 	submatches []string
 	names      map[string]int
 }
 
-// NewMatch returns a new Match object given a reporter used to report
-// failures and submatches to be inspected.
+// NewMatch returns a new Match instance.
 //
-// reporter should not be nil. submatches and names may be nil.
+// If reporter is nil, the function panics.
+// Both submatches and names may be nil.
 //
 // Example:
-//   s := "http://example.com/users/john"
-//   r := regexp.MustCompile(`http://(?P<host>.+)/users/(?P<user>.+)`)
-//   m := NewMatch(reporter, r.FindStringSubmatch(s), r.SubexpNames())
 //
-//   m.NotEmpty()
-//   m.Length().Equal(3)
+//	s := "http://example.com/users/john"
+//	r := regexp.MustCompile(`http://(?P<host>.+)/users/(?P<user>.+)`)
 //
-//   m.Index(0).Equal("http://example.com/users/john")
-//   m.Index(1).Equal("example.com")
-//   m.Index(2).Equal("john")
+//	m := NewMatch(t, r.FindStringSubmatch(s), r.SubexpNames())
 //
-//   m.Name("host").Equal("example.com")
-//   m.Name("user").Equal("john")
+//	m.NotEmpty()
+//	m.Length().Equal(3)
+//
+//	m.Index(0).Equal("http://example.com/users/john")
+//	m.Index(1).Equal("example.com")
+//	m.Index(2).Equal("john")
+//
+//	m.Name("host").Equal("example.com")
+//	m.Name("user").Equal("john")
 func NewMatch(reporter Reporter, submatches []string, names []string) *Match {
-	return makeMatch(makeChain(reporter), submatches, names)
+	return newMatch(newChainWithDefaults("Match()", reporter), submatches, names)
 }
 
-func makeMatch(chain chain, submatches []string, names []string) *Match {
-	if submatches == nil {
-		submatches = []string{}
+// NewMatchC returns a new Match instance with config.
+//
+// Requirements for config are same as for WithConfig function.
+// Both submatches and names may be nil.
+//
+// Example:
+//
+//	s := "http://example.com/users/john"
+//	r := regexp.MustCompile(`http://(?P<host>.+)/users/(?P<user>.+)`)
+//
+//	m := NewMatchC(config, r.FindStringSubmatch(s), r.SubexpNames())
+//
+//	m.NotEmpty()
+//	m.Length().Equal(3)
+//
+//	m.Index(0).Equal("http://example.com/users/john")
+//	m.Index(1).Equal("example.com")
+//	m.Index(2).Equal("john")
+//
+//	m.Name("host").Equal("example.com")
+//	m.Name("user").Equal("john")
+func NewMatchC(config Config, submatches []string, names []string) *Match {
+	return newMatch(newChainWithConfig("Match()", config.withDefaults()), submatches, names)
+}
+
+func newMatch(parent *chain, matchList []string, nameList []string) *Match {
+	m := &Match{parent.clone(), nil, nil}
+	if matchList != nil {
+		m.submatches = matchList
+	} else {
+		m.submatches = []string{}
 	}
-	namemap := map[string]int{}
-	for n, name := range names {
+
+	m.names = map[string]int{}
+	for n, name := range nameList {
 		if name != "" {
-			namemap[name] = n
+			m.names[name] = n
 		}
 	}
-	return &Match{chain, submatches, namemap}
+
+	return m
 }
 
 // Raw returns underlying submatches attached to Match.
 // This is the value originally passed to NewMatch.
 //
 // Example:
-//  m := NewMatch(t, submatches, names)
-//  assert.Equal(t, submatches, m.Raw())
+//
+//	m := NewMatch(t, submatches, names)
+//	assert.Equal(t, submatches, m.Raw())
 func (m *Match) Raw() []string {
 	return m.submatches
 }
 
-// Length returns a new Number object that may be used to inspect
-// number of submatches.
+// Length returns a new Number instance with number of submatches.
 //
 // Example:
-//  m := NewMatch(t, submatches, names)
-//  m.Length().Equal(len(submatches))
+//
+//	m := NewMatch(t, submatches, names)
+//	m.Length().Equal(len(submatches))
 func (m *Match) Length() *Number {
-	return &Number{m.chain, float64(len(m.submatches))}
+	m.chain.enter("Length()")
+	defer m.chain.leave()
+
+	if m.chain.failed() {
+		return newNumber(m.chain, 0)
+	}
+
+	return newNumber(m.chain, float64(len(m.submatches)))
 }
 
-// Index returns a new String object that may be used to inspect submatch
-// with given index.
+// Index returns a new String instance with submatch for given index.
 //
 // Note that submatch with index 0 contains the whole match. If index is out
-// of bounds, Index reports failure and returns empty (but non-nil) value.
+// of bounds, Index reports failure and returns empty (but non-nil) instance.
 //
 // Example:
-//   s := "http://example.com/users/john"
 //
-//   r := regexp.MustCompile(`http://(.+)/users/(.+)`)
-//   m := NewMatch(t, r.FindStringSubmatch(s), nil)
+//	s := "http://example.com/users/john"
 //
-//   m.Index(0).Equal("http://example.com/users/john")
-//   m.Index(1).Equal("example.com")
-//   m.Index(2).Equal("john")
+//	r := regexp.MustCompile(`http://(.+)/users/(.+)`)
+//	m := NewMatch(t, r.FindStringSubmatch(s), nil)
+//
+//	m.Index(0).Equal("http://example.com/users/john")
+//	m.Index(1).Equal("example.com")
+//	m.Index(2).Equal("john")
 func (m *Match) Index(index int) *String {
-	if index < 0 || index >= len(m.submatches) {
-		m.chain.fail(
-			"\nsubmatch index out of bounds:\n  index %d\n\n  bounds [%d; %d)",
-			index,
-			0,
-			len(m.submatches))
-		return &String{m.chain, ""}
+	m.chain.enter("Index(%d)", index)
+	defer m.chain.leave()
+
+	if m.chain.failed() {
+		return newString(m.chain, "")
 	}
-	return &String{m.chain, m.submatches[index]}
+
+	if index < 0 || index >= len(m.submatches) {
+		m.chain.fail(AssertionFailure{
+			Type:   AssertInRange,
+			Actual: &AssertionValue{index},
+			Expected: &AssertionValue{AssertionRange{
+				Min: 0,
+				Max: len(m.submatches) - 1,
+			}},
+			Errors: []error{
+				errors.New("expected: valid sub-match index"),
+			},
+		})
+		return newString(m.chain, "")
+	}
+
+	return newString(m.chain, m.submatches[index])
 }
 
-// Name returns a new String object that may be used to inspect submatch
-// with given name.
+// Name returns a new String instance with submatch for given name.
 //
 // If there is no submatch with given name, Name reports failure and returns
-// empty (but non-nil) value.
+// empty (but non-nil) instance.
 //
 // Example:
-//   s := "http://example.com/users/john"
 //
-//   r := regexp.MustCompile(`http://(?P<host>.+)/users/(?P<user>.+)`)
-//   m := NewMatch(t, r.FindStringSubmatch(s), r.SubexpNames())
+//	s := "http://example.com/users/john"
 //
-//   m.Name("host").Equal("example.com")
-//   m.Name("user").Equal("john")
+//	r := regexp.MustCompile(`http://(?P<host>.+)/users/(?P<user>.+)`)
+//	m := NewMatch(t, r.FindStringSubmatch(s), r.SubexpNames())
+//
+//	m.Name("host").Equal("example.com")
+//	m.Name("user").Equal("john")
 func (m *Match) Name(name string) *String {
+	m.chain.enter("Name(%q)", name)
+	defer m.chain.leave()
+
+	if m.chain.failed() {
+		return newString(m.chain, "")
+	}
+
 	index, ok := m.names[name]
 	if !ok {
-		m.chain.fail(
-			"\nsubmatch name not found:\n %q\n\navailable names:\n%s",
-			name,
-			dumpValue(m.names))
-		return &String{m.chain, ""}
+		names := make([]interface{}, 0, len(m.names))
+		for nm := range m.names {
+			names = append(names, nm)
+		}
+		m.chain.fail(AssertionFailure{
+			Type:     AssertBelongs,
+			Actual:   &AssertionValue{name},
+			Expected: &AssertionValue{AssertionList(names)},
+			Errors: []error{
+				errors.New("expected: existing sub-match name"),
+			},
+		})
+		return newString(m.chain, "")
 	}
-	return m.Index(index)
+
+	return newString(m.chain, m.submatches[index])
 }
 
 // Empty succeeds if submatches array is empty.
 //
 // Example:
-//  m := NewMatch(t, submatches, names)
-//  m.Empty()
+//
+//	m := NewMatch(t, submatches, names)
+//	m.Empty()
 func (m *Match) Empty() *Match {
-	if len(m.submatches) != 0 {
-		m.chain.fail("\nexpected zero submatches, but got:\n  %s",
-			dumpValue(m.submatches))
+	m.chain.enter("Empty()")
+	defer m.chain.leave()
+
+	if m.chain.failed() {
+		return m
 	}
+
+	if !(len(m.submatches) == 0) {
+		m.chain.fail(AssertionFailure{
+			Type:   AssertEmpty,
+			Actual: &AssertionValue{m.submatches},
+			Errors: []error{
+				errors.New("expected: empty sub-match list"),
+			},
+		})
+	}
+
 	return m
 }
 
 // NotEmpty succeeds if submatches array is non-empty.
 //
 // Example:
-//  m := NewMatch(t, submatches, names)
-//  m.NotEmpty()
+//
+//	m := NewMatch(t, submatches, names)
+//	m.NotEmpty()
 func (m *Match) NotEmpty() *Match {
-	if len(m.submatches) == 0 {
-		m.chain.fail("expected non-zero submatches")
+	m.chain.enter("NotEmpty()")
+	defer m.chain.leave()
+
+	if m.chain.failed() {
+		return m
 	}
+
+	if !(len(m.submatches) != 0) {
+		m.chain.fail(AssertionFailure{
+			Type:   AssertNotEmpty,
+			Actual: &AssertionValue{m.submatches},
+			Errors: []error{
+				errors.New("expected: non-empty sub-match list"),
+			},
+		})
+	}
+
 	return m
 }
 
@@ -152,19 +252,34 @@ func (m *Match) NotEmpty() *Match {
 // included into this check.
 //
 // Example:
-//   s := "http://example.com/users/john"
-//   r := regexp.MustCompile(`http://(.+)/users/(.+)`)
-//   m := NewMatch(t, r.FindStringSubmatch(s), nil)
-//   m.Values("example.com", "john")
+//
+//	s := "http://example.com/users/john"
+//	r := regexp.MustCompile(`http://(.+)/users/(.+)`)
+//	m := NewMatch(t, r.FindStringSubmatch(s), nil)
+//	m.Values("example.com", "john")
 func (m *Match) Values(values ...string) *Match {
+	m.chain.enter("Values()")
+	defer m.chain.leave()
+
+	if m.chain.failed() {
+		return m
+	}
+
 	if values == nil {
 		values = []string{}
 	}
+
 	if !reflect.DeepEqual(values, m.getValues()) {
-		m.chain.fail("\nexpected submatches equal to:\n%s\n\nbut got:\n%s",
-			dumpValue(values),
-			dumpValue(m.getValues()))
+		m.chain.fail(AssertionFailure{
+			Type:     AssertEqual,
+			Actual:   &AssertionValue{m.submatches},
+			Expected: &AssertionValue{values},
+			Errors: []error{
+				errors.New("expected: sub-match lists are equal"),
+			},
+		})
 	}
+
 	return m
 }
 
@@ -175,18 +290,30 @@ func (m *Match) Values(values ...string) *Match {
 // included into this check.
 //
 // Example:
-//   s := "http://example.com/users/john"
-//   r := regexp.MustCompile(`http://(.+)/users/(.+)`)
-//   m := NewMatch(t, r.FindStringSubmatch(s), nil)
-//   m.NotValues("example.com", "bob")
+//
+//	s := "http://example.com/users/john"
+//	r := regexp.MustCompile(`http://(.+)/users/(.+)`)
+//	m := NewMatch(t, r.FindStringSubmatch(s), nil)
+//	m.NotValues("example.com", "bob")
 func (m *Match) NotValues(values ...string) *Match {
+	m.chain.enter("NotValues()")
+	defer m.chain.leave()
+
 	if values == nil {
 		values = []string{}
 	}
+
 	if reflect.DeepEqual(values, m.getValues()) {
-		m.chain.fail("\nexpected submatches not equal to:\n%s",
-			dumpValue(values))
+		m.chain.fail(AssertionFailure{
+			Type:     AssertNotEqual,
+			Actual:   &AssertionValue{m.submatches},
+			Expected: &AssertionValue{values},
+			Errors: []error{
+				errors.New("expected: sub-match lists are non-equal"),
+			},
+		})
 	}
+
 	return m
 }
 
