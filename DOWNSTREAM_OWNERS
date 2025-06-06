@@ -3,15 +3,17 @@ approvers:
   - alebedev87
   - gcs278
   - candita
-  - frobware
   - rfredette
-  - miheer
+  - grzpiotrowski
+  - Thealisyed
+  - rohara
 reviewers:
   - Miciah
   - alebedev87
   - gcs278
   - candita
-  - frobware
   - rfredette
-  - miheer
+  - grzpiotrowski
+  - Thealisyed
+  - rohara
 component: Ingress
