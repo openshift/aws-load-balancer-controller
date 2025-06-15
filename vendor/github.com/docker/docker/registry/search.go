@@ -1,4 +1,4 @@
-package registry // import "github.com/docker/docker/registry"
+package registry
 
 import (
 	"context"
@@ -6,17 +6,15 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/containerd/log"
+	"github.com/docker/distribution/registry/client/auth"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/registry"
-	"github.com/docker/docker/errdefs"
-
-	"github.com/docker/distribution/registry/client/auth"
 	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 var acceptedSearchFilterTags = map[string]bool{
-	"is-automated": true,
+	"is-automated": true, // Deprecated: the "is_automated" field is deprecated and will always be false in the future.
 	"is-official":  true,
 	"stars":        true,
 }
@@ -32,6 +30,12 @@ func (s *Service) Search(ctx context.Context, searchFilters filters.Args, term s
 	if err != nil {
 		return nil, err
 	}
+
+	// "is-automated" is deprecated and filtering for `true` will yield no results.
+	if isAutomated {
+		return []registry.SearchResult{}, nil
+	}
+
 	isOfficial, err := searchFilters.GetBoolOrDefault("is-official", false)
 	if err != nil {
 		return nil, err
@@ -43,7 +47,7 @@ func (s *Service) Search(ctx context.Context, searchFilters filters.Args, term s
 		for _, hasStar := range hasStars {
 			iHasStar, err := strconv.Atoi(hasStar)
 			if err != nil {
-				return nil, errdefs.InvalidParameter(errors.Wrapf(err, "invalid filter 'stars=%s'", hasStar))
+				return nil, invalidParameterErr{errors.Wrapf(err, "invalid filter 'stars=%s'", hasStar)}
 			}
 			if iHasStar > hasStarFilter {
 				hasStarFilter = iHasStar
@@ -58,11 +62,6 @@ func (s *Service) Search(ctx context.Context, searchFilters filters.Args, term s
 
 	filteredResults := []registry.SearchResult{}
 	for _, result := range unfilteredResult.Results {
-		if searchFilters.Contains("is-automated") {
-			if isAutomated != result.IsAutomated {
-				continue
-			}
-		}
 		if searchFilters.Contains("is-official") {
 			if isOfficial != result.IsOfficial {
 				continue
@@ -73,6 +72,10 @@ func (s *Service) Search(ctx context.Context, searchFilters filters.Args, term s
 				continue
 			}
 		}
+		// "is-automated" is deprecated and the value in Docker Hub search
+		// results is untrustworthy. Force it to false so as to not mislead our
+		// clients.
+		result.IsAutomated = false //nolint:staticcheck  // ignore SA1019 (field is deprecated)
 		filteredResults = append(filteredResults, result)
 	}
 
@@ -80,7 +83,6 @@ func (s *Service) Search(ctx context.Context, searchFilters filters.Args, term s
 }
 
 func (s *Service) searchUnfiltered(ctx context.Context, term string, limit int, authConfig *registry.AuthConfig, headers http.Header) (*registry.SearchResults, error) {
-	// TODO Use ctx when searching for repositories
 	if hasScheme(term) {
 		return nil, invalidParamf("invalid repository name: repository name (%s) should not have a scheme", term)
 	}
@@ -89,18 +91,14 @@ func (s *Service) searchUnfiltered(ctx context.Context, term string, limit int, 
 
 	// Search is a long-running operation, just lock s.config to avoid block others.
 	s.mu.RLock()
-	index, err := newIndexInfo(s.config, indexName)
+	index := newIndexInfo(s.config, indexName)
 	s.mu.RUnlock()
-
-	if err != nil {
-		return nil, err
-	}
 	if index.Official {
 		// If pull "library/foo", it's stored locally under "foo"
 		remoteName = strings.TrimPrefix(remoteName, "library/")
 	}
 
-	endpoint, err := newV1Endpoint(index, headers)
+	endpoint, err := newV1Endpoint(ctx, index, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -108,16 +106,12 @@ func (s *Service) searchUnfiltered(ctx context.Context, term string, limit int, 
 	var client *http.Client
 	if authConfig != nil && authConfig.IdentityToken != "" && authConfig.Username != "" {
 		creds := NewStaticCredentialStore(authConfig)
-		scopes := []auth.Scope{
-			auth.RegistryScope{
-				Name:    "catalog",
-				Actions: []string{"search"},
-			},
-		}
 
 		// TODO(thaJeztah); is there a reason not to include other headers here? (originally added in 19d48f0b8ba59eea9f2cac4ad1c7977712a6b7ac)
 		modifiers := Headers(headers.Get("User-Agent"), nil)
-		v2Client, err := v2AuthHTTPClient(endpoint.URL, endpoint.client.Transport, modifiers, creds, scopes)
+		v2Client, err := v2AuthHTTPClient(endpoint.URL, endpoint.client.Transport, modifiers, creds, []auth.Scope{
+			auth.RegistryScope{Name: "catalog", Actions: []string{"search"}},
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -126,14 +120,51 @@ func (s *Service) searchUnfiltered(ctx context.Context, term string, limit int, 
 		v2Client.CheckRedirect = endpoint.client.CheckRedirect
 		v2Client.Jar = endpoint.client.Jar
 
-		logrus.Debugf("using v2 client for search to %s", endpoint.URL)
+		log.G(ctx).Debugf("using v2 client for search to %s", endpoint.URL)
 		client = v2Client
 	} else {
 		client = endpoint.client
-		if err := authorizeClient(client, authConfig, endpoint); err != nil {
+		if err := authorizeClient(ctx, client, authConfig, endpoint); err != nil {
 			return nil, err
 		}
 	}
 
-	return newSession(client, endpoint).searchRepositories(remoteName, limit)
+	return newSession(client, endpoint).searchRepositories(ctx, remoteName, limit)
+}
+
+// splitReposSearchTerm breaks a search term into an index name and remote name
+func splitReposSearchTerm(reposName string) (string, string) {
+	nameParts := strings.SplitN(reposName, "/", 2)
+	if len(nameParts) == 1 || (!strings.Contains(nameParts[0], ".") &&
+		!strings.Contains(nameParts[0], ":") && nameParts[0] != "localhost") {
+		// This is a Docker Hub repository (ex: samalba/hipache or ubuntu),
+		// use the default Docker Hub registry (docker.io)
+		return IndexName, reposName
+	}
+	return nameParts[0], nameParts[1]
+}
+
+// ParseSearchIndexInfo will use repository name to get back an indexInfo.
+//
+// TODO(thaJeztah) this function is only used by the CLI, and used to get
+// information of the registry (to provide credentials if needed). We should
+// move this function (or equivalent) to the CLI, as it's doing too much just
+// for that.
+func ParseSearchIndexInfo(reposName string) (*registry.IndexInfo, error) {
+	indexName, _ := splitReposSearchTerm(reposName)
+	indexName = normalizeIndexName(indexName)
+	if indexName == IndexName {
+		return &registry.IndexInfo{
+			Name:     IndexName,
+			Mirrors:  []string{},
+			Secure:   true,
+			Official: true,
+		}, nil
+	}
+
+	return &registry.IndexInfo{
+		Name:    indexName,
+		Mirrors: []string{},
+		Secure:  !isInsecure(indexName),
+	}, nil
 }
