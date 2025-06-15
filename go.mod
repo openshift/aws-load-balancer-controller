@@ -1,20 +1,22 @@
 module sigs.k8s.io/aws-load-balancer-controller
 
-go 1.22.3
+go 1.23.0
+
+toolchain go1.23.9
 
 require (
 	github.com/aws/aws-sdk-go v1.50.8
 	github.com/evanphx/json-patch v5.7.0+incompatible
 	github.com/gavv/httpexpect/v2 v2.9.0
-	github.com/go-logr/logr v1.4.1
+	github.com/go-logr/logr v1.4.2
 	github.com/golang/mock v1.6.0
-	github.com/google/go-cmp v0.6.0
+	github.com/google/go-cmp v0.7.0
 	github.com/onsi/ginkgo/v2 v2.17.1
 	github.com/onsi/gomega v1.32.0
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.16.0
 	github.com/spf13/pflag v1.0.5
-	github.com/stretchr/testify v1.8.4
+	github.com/stretchr/testify v1.10.0
 	go.uber.org/zap v1.26.0
 	golang.org/x/time v0.3.0
 	gomodules.xyz/jsonpatch/v2 v2.4.0
@@ -141,10 +143,11 @@ require (
 	github.com/yalp/jsonpath v0.0.0-20180802001716-5cc68e5049a0 // indirect
 	github.com/yudai/gojsondiff v1.0.0 // indirect
 	github.com/yudai/golcs v0.0.0-20170316035057-ecda9a501e82 // indirect
+	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.45.0 // indirect
-	go.opentelemetry.io/otel v1.19.0 // indirect
-	go.opentelemetry.io/otel/metric v1.19.0 // indirect
-	go.opentelemetry.io/otel/trace v1.19.0 // indirect
+	go.opentelemetry.io/otel v1.36.0 // indirect
+	go.opentelemetry.io/otel/metric v1.36.0 // indirect
+	go.opentelemetry.io/otel/trace v1.36.0 // indirect
 	go.starlark.net v0.0.0-20230525235612-a134d8f9ddca // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/crypto v0.21.0 // indirect
