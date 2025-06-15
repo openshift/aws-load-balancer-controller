@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -15,7 +14,9 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ajg/form"
@@ -28,7 +29,8 @@ import (
 // Request provides methods to incrementally build http.Request object,
 // send it, and receive response.
 type Request struct {
-	noCopy noCopy
+	mu sync.Mutex
+
 	config Config
 	chain  *chain
 
@@ -36,6 +38,7 @@ type Request struct {
 	maxRedirects   int
 
 	retryPolicy   RetryPolicy
+	retryPolicyFn func(*http.Response, error) bool
 	maxRetries    int
 	minRetryDelay time.Duration
 	maxRetryDelay time.Duration
@@ -45,20 +48,24 @@ type Request struct {
 
 	httpReq *http.Request
 	path    string
-	query   url.Values
 
-	form      url.Values
-	formbuf   *bytes.Buffer
-	multipart *multipart.Writer
+	query        url.Values
+	queryEncoder QueryEncoder
 
-	bodySetter string
-	typeSetter string
-	forceType  bool
+	form        url.Values
+	formBuf     *bytes.Buffer
+	multipart   *multipart.Writer
+	multipartFn func(w io.Writer) *multipart.Writer
+
+	bodySetter   string
+	typeSetter   string
+	forceType    bool
+	expectCalled bool
 
 	wsUpgrade bool
 
-	transforms []func(*http.Request)
-	matchers   []func(*Response)
+	transformers []func(*http.Request)
+	matchers     []func(*Response)
 }
 
 // Deprecated: use NewRequestC instead.
@@ -97,7 +104,7 @@ func NewRequestC(config Config, method, path string, pathargs ...interface{}) *R
 	config = config.withDefaults()
 
 	return newRequest(
-		newChainWithConfig("Request()", config),
+		newChainWithConfig(fmt.Sprintf("Request(%q)", method), config),
 		config,
 		method,
 		path,
@@ -117,67 +124,81 @@ func newRequest(
 		redirectPolicy: defaultRedirectPolicy,
 		maxRedirects:   -1,
 
-		retryPolicy:   RetryTemporaryNetworkAndServerErrors,
+		retryPolicy:   defaultRetryPolicy,
+		retryPolicyFn: nil,
 		maxRetries:    0,
 		minRetryDelay: time.Millisecond * 50,
 		maxRetryDelay: time.Second * 5,
 		sleepFn: func(d time.Duration) <-chan time.Time {
 			return time.After(d)
 		},
+
+		query:        nil,
+		queryEncoder: defaultQueryEncoder,
+
+		multipartFn: func(w io.Writer) *multipart.Writer {
+			return multipart.NewWriter(w)
+		},
 	}
 
-	r.initPath(path, pathargs...)
-	r.initReq(method)
+	opChain := r.chain.enter("")
+	defer opChain.leave()
+
+	r.initPath(opChain, path, pathargs...)
+	r.initReq(opChain, method)
 
 	r.chain.setRequest(r)
 
 	return r
 }
 
-func (r *Request) initPath(path string, pathargs ...interface{}) {
-	var n int
+func (r *Request) initPath(opChain *chain, path string, pathargs ...interface{}) {
+	if len(pathargs) != 0 {
+		var n int
 
-	path, err := interpol.WithFunc(path, func(k string, w io.Writer) error {
-		if n < len(pathargs) {
-			if pathargs[n] == nil {
-				r.chain.fail(AssertionFailure{
-					Type:   AssertValid,
-					Actual: &AssertionValue{pathargs},
-					Errors: []error{
-						fmt.Errorf("unexpected nil argument at index %d", n),
-					},
-				})
+		var err error
+		path, err = interpol.WithFunc(path, func(k string, w io.Writer) error {
+			if n < len(pathargs) {
+				if pathargs[n] == nil {
+					opChain.fail(AssertionFailure{
+						Type:   AssertValid,
+						Actual: &AssertionValue{pathargs},
+						Errors: []error{
+							fmt.Errorf("unexpected nil argument at index %d", n),
+						},
+					})
+				} else {
+					mustWrite(w, fmt.Sprint(pathargs[n]))
+				}
 			} else {
-				mustWrite(w, fmt.Sprint(pathargs[n]))
+				mustWrite(w, "{")
+				mustWrite(w, k)
+				mustWrite(w, "}")
 			}
-		} else {
-			mustWrite(w, "{")
-			mustWrite(w, k)
-			mustWrite(w, "}")
-		}
-		n++
-		return nil
-	})
-
-	if err != nil {
-		r.chain.fail(AssertionFailure{
-			Type:   AssertValid,
-			Actual: &AssertionValue{path},
-			Errors: []error{
-				errors.New("invalid interpol string"),
-				err,
-			},
+			n++
+			return nil
 		})
+
+		if err != nil {
+			opChain.fail(AssertionFailure{
+				Type:   AssertValid,
+				Actual: &AssertionValue{path},
+				Errors: []error{
+					errors.New("invalid interpol string"),
+					err,
+				},
+			})
+		}
 	}
 
 	r.path = path
 }
 
-func (r *Request) initReq(method string) {
+func (r *Request) initReq(opChain *chain, method string) {
 	httpReq, err := r.config.RequestFactory.NewRequest(method, r.config.BaseURL, nil)
 
 	if err != nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertOperation,
 			Errors: []error{
 				errors.New("failed to create http request"),
@@ -189,18 +210,130 @@ func (r *Request) initReq(method string) {
 	r.httpReq = httpReq
 }
 
+// Alias is similar to Value.Alias.
+func (r *Request) Alias(name string) *Request {
+	opChain := r.chain.enter("Alias(%q)", name)
+	defer opChain.leave()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.chain.setAlias(name)
+	return r
+}
+
 // WithName sets convenient request name.
 // This name will be included in assertion reports for this request.
+// It does not affect assertion chain path, inlike Alias.
 //
 // Example:
 //
 //	req := NewRequestC(config, "POST", "/api/login")
 //	req.WithName("Login Request")
 func (r *Request) WithName(name string) *Request {
-	r.chain.enter("WithName()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithName()")
+	defer opChain.leave()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithName()") {
+		return r
+	}
 
 	r.chain.setRequestName(name)
+
+	return r
+}
+
+// WithReporter sets reporter to be used for this request.
+//
+// The new reporter overwrites AssertionHandler.
+// The new AssertionHandler is DefaultAssertionHandler with specified reporter,
+// existing Config.Formatter and nil Logger.
+// It will be used to report formatted fatal failure messages.
+//
+// Example:
+//
+//	req := NewRequestC(config, "GET", "http://example.com/path")
+//	req.WithReporter(t)
+func (r *Request) WithReporter(reporter Reporter) *Request {
+	opChain := r.chain.enter("WithReporter()")
+	defer opChain.leave()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithReporter()") {
+		return r
+	}
+
+	if reporter == nil {
+		opChain.fail(AssertionFailure{
+			Type: AssertUsage,
+			Errors: []error{
+				errors.New("unexpected nil argument"),
+			},
+		})
+		return r
+	}
+
+	handler := &DefaultAssertionHandler{
+		Reporter:  reporter,
+		Formatter: r.config.Formatter,
+	}
+	r.chain.setHandler(handler)
+
+	return r
+}
+
+// WithAssertionHandler sets assertion handler to be used for this request.
+//
+// The new handler overwrites assertion handler that will be used
+// by Request and its children (Response, Body, etc.).
+// It will be used to format and report test Failure or Success.
+//
+// Example:
+//
+//	req := NewRequestC(config, "GET", "http://example.com/path")
+//	req.WithAssertionHandler(&DefaultAssertionHandler{
+//		Reporter:  reporter,
+//		Formatter: formatter,
+//	})
+func (r *Request) WithAssertionHandler(handler AssertionHandler) *Request {
+	opChain := r.chain.enter("WithAssertionHandler()")
+	defer opChain.leave()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithAssertionHandler()") {
+		return r
+	}
+
+	if handler == nil {
+		opChain.fail(AssertionFailure{
+			Type: AssertUsage,
+			Errors: []error{
+				errors.New("unexpected nil argument"),
+			},
+		})
+		return r
+	}
+
+	r.chain.setHandler(handler)
 
 	return r
 }
@@ -213,18 +346,25 @@ func (r *Request) WithName(name string) *Request {
 //
 //	req := NewRequestC(config, "GET", "/path")
 //	req.WithMatcher(func (resp *httpexpect.Response) {
-//	    resp.Header("API-Version").NotEmpty()
+//		resp.Header("API-Version").NotEmpty()
 //	})
 func (r *Request) WithMatcher(matcher func(*Response)) *Request {
-	r.chain.enter("WithMatcher()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithMatcher()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithMatcher()") {
 		return r
 	}
 
 	if matcher == nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertUsage,
 			Errors: []error{
 				errors.New("unexpected nil argument"),
@@ -245,16 +385,23 @@ func (r *Request) WithMatcher(matcher func(*Response)) *Request {
 //
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	req.WithTransformer(func(r *http.Request) { r.Header.Add("foo", "bar") })
-func (r *Request) WithTransformer(transform func(*http.Request)) *Request {
-	r.chain.enter("WithTransformer()")
-	defer r.chain.leave()
+func (r *Request) WithTransformer(transformer func(*http.Request)) *Request {
+	opChain := r.chain.enter("WithTransformer()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
 		return r
 	}
 
-	if transform == nil {
-		r.chain.fail(AssertionFailure{
+	if !r.checkOrder(opChain, "WithTransformer()") {
+		return r
+	}
+
+	if transformer == nil {
+		opChain.fail(AssertionFailure{
 			Type: AssertUsage,
 			Errors: []error{
 				errors.New("unexpected nil argument"),
@@ -263,7 +410,7 @@ func (r *Request) WithTransformer(transform func(*http.Request)) *Request {
 		return r
 	}
 
-	r.transforms = append(r.transforms, transform)
+	r.transformers = append(r.transformers, transformer)
 
 	return r
 }
@@ -278,19 +425,26 @@ func (r *Request) WithTransformer(transform func(*http.Request)) *Request {
 //	req := NewRequestC(config, "GET", "/path")
 //	req.WithClient(&http.Client{
 //	  Transport: &http.Transport{
-//	    DisableCompression: true,
+//		DisableCompression: true,
 //	  },
 //	})
 func (r *Request) WithClient(client Client) *Request {
-	r.chain.enter("WithClient()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithClient()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithClient()") {
 		return r
 	}
 
 	if client == nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertUsage,
 			Errors: []error{
 				errors.New("unexpected nil argument"),
@@ -315,15 +469,22 @@ func (r *Request) WithClient(client Client) *Request {
 //	req := NewRequestC(config, "GET", "/path")
 //	req.WithHandler(myServer.someHandler)
 func (r *Request) WithHandler(handler http.Handler) *Request {
-	r.chain.enter("WithHandler()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithHandler()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithHandler()") {
 		return r
 	}
 
 	if handler == nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertUsage,
 			Errors: []error{
 				errors.New("unexpected nil argument"),
@@ -360,15 +521,22 @@ func (r *Request) WithHandler(handler http.Handler) *Request {
 //	req.WithContext(ctx)
 //	req.Expect().Status(http.StatusOK)
 func (r *Request) WithContext(ctx context.Context) *Request {
-	r.chain.enter("WithContext()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithContext()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithContext()") {
 		return r
 	}
 
 	if ctx == nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertUsage,
 			Errors: []error{
 				errors.New("unexpected nil argument"),
@@ -398,10 +566,17 @@ func (r *Request) WithContext(ctx context.Context) *Request {
 //	req.WithTimeout(time.Duration(3)*time.Second)
 //	req.Expect().Status(http.StatusOK)
 func (r *Request) WithTimeout(timeout time.Duration) *Request {
-	r.chain.enter("WithTimeout()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithTimeout()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithTimeout()") {
 		return r
 	}
 
@@ -463,10 +638,17 @@ const (
 //	req2.WithRedirectPolicy(DontFollowRedirects)
 //	req2.Expect().Status(http.StatusPermanentRedirect)
 func (r *Request) WithRedirectPolicy(policy RedirectPolicy) *Request {
-	r.chain.enter("WithRedirectPolicy()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithRedirectPolicy()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithRedirectPolicy()") {
 		return r
 	}
 
@@ -491,15 +673,22 @@ func (r *Request) WithRedirectPolicy(policy RedirectPolicy) *Request {
 //	req1.WithMaxRedirects(1)
 //	req1.Expect().Status(http.StatusOK)
 func (r *Request) WithMaxRedirects(maxRedirects int) *Request {
-	r.chain.enter("WithMaxRedirects()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithMaxRedirects()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithMaxRedirects()") {
 		return r
 	}
 
 	if maxRedirects < 0 {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertValid,
 			Actual: &AssertionValue{maxRedirects},
 			Errors: []error{
@@ -521,17 +710,26 @@ func (r *Request) WithMaxRedirects(maxRedirects int) *Request {
 type RetryPolicy int
 
 const (
-	// DontRetry disables retrying at all.
-	DontRetry RetryPolicy = iota
+	// indicates that WithRetryPolicy was not called
+	defaultRetryPolicy RetryPolicy = iota
 
-	// RetryTemporaryNetworkErrors enables retrying only temporary network errors.
-	// Retry happens if Client returns net.Error and its Temporary() method
-	// returns true.
+	// DontRetry disables retrying at all.
+	DontRetry
+
+	// Deprecated: use RetryTimeoutErrors instead.
 	RetryTemporaryNetworkErrors
 
-	// RetryTemporaryNetworkAndServerErrors enables retrying of temporary network
-	// errors, as well as 5xx status codes.
+	// Deprecated: use RetryTimeoutAndServerErrors instead.
 	RetryTemporaryNetworkAndServerErrors
+
+	// RetryTimeoutErrors enables retrying of timeout errors.
+	// Retry happens if Client returns net.Error and its Timeout() method
+	// returns true.
+	RetryTimeoutErrors
+
+	// RetryTimeoutAndServerErrors enables retrying of network timeout errors,
+	// as well as 5xx status codes.
+	RetryTimeoutAndServerErrors
 
 	// RetryAllErrors enables retrying of any error or 4xx/5xx status code.
 	RetryAllErrors
@@ -545,7 +743,7 @@ const (
 // How much retry attempts happens is defined by WithMaxRetries().
 // How much to wait between attempts is defined by WithRetryDelay().
 //
-// Default retry policy is RetryTemporaryNetworkAndServerErrors, but
+// Default retry policy is RetryTimeoutAndServerErrors, but
 // default maximum number of retries is zero, so no retries happen
 // unless WithMaxRetries() is called.
 //
@@ -555,14 +753,77 @@ const (
 //	req.WithRetryPolicy(RetryAllErrors)
 //	req.Expect().Status(http.StatusOK)
 func (r *Request) WithRetryPolicy(policy RetryPolicy) *Request {
-	r.chain.enter("WithRetryPolicy()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithRetryPolicy()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithRetryPolicy()") {
+		return r
+	}
+
+	if r.retryPolicyFn != nil {
+		opChain.fail(AssertionFailure{
+			Type: AssertUsage,
+			Errors: []error{
+				fmt.Errorf("unexpected call:" +
+					" WithRetryPolicy() and WithRetryPolicyFunc() are mutually exclusive"),
+			},
+		})
 		return r
 	}
 
 	r.retryPolicy = policy
+
+	return r
+}
+
+// WithRetryPolicyFunc sets a function to replace built-in policies
+// with user-defined policy.
+//
+// The function expects you to return true to perform a retry. And false to
+// not perform a retry.
+//
+// Example:
+//
+//	req := NewRequestC(config, "POST", "/path")
+//	req.WithRetryPolicyFunc(func(res *http.Response, err error) bool {
+//		return resp.StatusCode == http.StatusTeapot
+//	})
+func (r *Request) WithRetryPolicyFunc(
+	fn func(res *http.Response, err error) bool,
+) *Request {
+	opChain := r.chain.enter("WithRetryPolicyFunc()")
+	defer opChain.leave()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithRetryPolicyFunc()") {
+		return r
+	}
+
+	if r.retryPolicy != defaultRetryPolicy {
+		opChain.fail(AssertionFailure{
+			Type: AssertUsage,
+			Errors: []error{
+				fmt.Errorf("unexpected call:" +
+					" WithRetryPolicy() and WithRetryPolicyFunc() are mutually exclusive"),
+			},
+		})
+		return r
+	}
+
+	r.retryPolicyFn = fn
 
 	return r
 }
@@ -583,15 +844,22 @@ func (r *Request) WithRetryPolicy(policy RetryPolicy) *Request {
 //	req.WithMaxRetries(1)
 //	req.Expect().Status(http.StatusOK)
 func (r *Request) WithMaxRetries(maxRetries int) *Request {
-	r.chain.enter("WithMaxRetries()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithMaxRetries()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithMaxRetries()") {
 		return r
 	}
 
 	if maxRetries < 0 {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertValid,
 			Actual: &AssertionValue{maxRetries},
 			Errors: []error{
@@ -619,15 +887,22 @@ func (r *Request) WithMaxRetries(maxRetries int) *Request {
 //	req.WithRetryDelay(time.Second, time.Minute)
 //	req.Expect().Status(http.StatusOK)
 func (r *Request) WithRetryDelay(minDelay, maxDelay time.Duration) *Request {
-	r.chain.enter("WithRetryDelay()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithRetryDelay()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithRetryDelay()") {
 		return r
 	}
 
 	if !(minDelay <= maxDelay) {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertValid,
 			Actual: &AssertionValue{
 				[2]time.Duration{minDelay, maxDelay},
@@ -666,10 +941,17 @@ func (r *Request) WithRetryDelay(minDelay, maxDelay time.Duration) *Request {
 //	ws := req.Expect().Status(http.StatusSwitchingProtocols).Websocket()
 //	defer ws.Disconnect()
 func (r *Request) WithWebsocketUpgrade() *Request {
-	r.chain.enter("WithWebsocketUpgrade()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithWebsocketUpgrade()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithWebsocketUpgrade()") {
 		return r
 	}
 
@@ -693,15 +975,22 @@ func (r *Request) WithWebsocketUpgrade() *Request {
 //	ws := req.Expect().Status(http.StatusSwitchingProtocols).Websocket()
 //	defer ws.Disconnect()
 func (r *Request) WithWebsocketDialer(dialer WebsocketDialer) *Request {
-	r.chain.enter("WithWebsocketDialer()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithWebsocketDialer()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithWebsocketDialer()") {
 		return r
 	}
 
 	if dialer == nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertUsage,
 			Errors: []error{
 				errors.New("unexpected nil argument"),
@@ -729,24 +1018,21 @@ func (r *Request) WithWebsocketDialer(dialer WebsocketDialer) *Request {
 //	req.WithPath("repo", "httpexpect")
 //	// path will be "/repos/gavv/httpexpect"
 func (r *Request) WithPath(key string, value interface{}) *Request {
-	r.chain.enter("WithPath()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithPath()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
 		return r
 	}
 
-	if value == nil {
-		r.chain.fail(AssertionFailure{
-			Type: AssertUsage,
-			Errors: []error{
-				errors.New("unexpected nil argument"),
-			},
-		})
+	if !r.checkOrder(opChain, "WithPath()") {
 		return r
 	}
 
-	r.withPath(key, value)
+	r.withPath(opChain, key, value)
 
 	return r
 }
@@ -766,8 +1052,8 @@ func (r *Request) WithPath(key string, value interface{}) *Request {
 // Example:
 //
 //	type MyPath struct {
-//	    Login string `path:"user"`
-//	    Repo  string
+//		Login string `path:"user"`
+//		Repo  string
 //	}
 //
 //	req := NewRequestC(config, "POST", "/repos/{user}/{repo}")
@@ -778,10 +1064,17 @@ func (r *Request) WithPath(key string, value interface{}) *Request {
 //	req.WithPathObject(map[string]string{"user": "gavv", "repo": "httpexpect"})
 //	// path will be "/repos/gavv/httpexpect"
 func (r *Request) WithPathObject(object interface{}) *Request {
-	r.chain.enter("WithPathObject()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithPathObject()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithPathObject()") {
 		return r
 	}
 
@@ -798,33 +1091,39 @@ func (r *Request) WithPathObject(object interface{}) *Request {
 		s.TagName = "path"
 		m = s.Map()
 	} else {
-		m, ok = canonMap(r.chain, object)
+		m, ok = canonMap(opChain, object)
 		if !ok {
 			return r
 		}
 	}
 
 	for key, value := range m {
-		r.withPath(key, value)
+		r.withPath(opChain, key, value)
 	}
 
 	return r
 }
 
-func (r *Request) withPath(key string, value interface{}) {
+func (r *Request) withPath(opChain *chain, key string, value interface{}) {
 	found := false
 
 	path, err := interpol.WithFunc(r.path, func(k string, w io.Writer) error {
 		if strings.EqualFold(k, key) {
 			if value == nil {
-				r.chain.fail(AssertionFailure{
+				opChain.fail(AssertionFailure{
 					Type: AssertUsage,
 					Errors: []error{
-						errors.New("unexpected nil interpol argument"),
+						fmt.Errorf("unexpected nil interpol argument %q", k),
 					},
 				})
 			} else {
-				mustWrite(w, fmt.Sprint(value))
+				switch value.(type) {
+				case float64, float32:
+					v := value.(float64)
+					mustWrite(w, strconv.FormatFloat(v, 'f', -1, 64))
+				default:
+					mustWrite(w, fmt.Sprint(value))
+				}
 				found = true
 			}
 		} else {
@@ -836,7 +1135,7 @@ func (r *Request) withPath(key string, value interface{}) {
 	})
 
 	if err != nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertValid,
 			Actual: &AssertionValue{path},
 			Errors: []error{
@@ -848,7 +1147,7 @@ func (r *Request) withPath(key string, value interface{}) {
 	}
 
 	if !found {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertUsage,
 			Errors: []error{
 				fmt.Errorf("key %q not found in interpol string", key),
@@ -871,15 +1170,22 @@ func (r *Request) withPath(key string, value interface{}) {
 //	req.WithQuery("b", "foo")
 //	// URL is now http://example.com/path?a=123&b=foo
 func (r *Request) WithQuery(key string, value interface{}) *Request {
-	r.chain.enter("WithQuery()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithQuery()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithQuery()") {
 		return r
 	}
 
 	if value == nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertUsage,
 			Errors: []error{
 				errors.New("unexpected nil argument"),
@@ -904,11 +1210,14 @@ func (r *Request) WithQuery(key string, value interface{}) *Request {
 // Various object types are supported. Structs may contain "url" struct tag,
 // similar to "json" struct tag for json.Marshal().
 //
+// You can force usage of specific encoder (google/go-querystring, ajg/form)
+// or its variation using WithQueryEncoder() method.
+//
 // Example:
 //
 //	type MyURL struct {
-//	    A int    `url:"a"`
-//	    B string `url:"b"`
+//		A int    `url:"a"`
+//		B string `url:"b"`
 //	}
 //
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
@@ -919,10 +1228,17 @@ func (r *Request) WithQuery(key string, value interface{}) *Request {
 //	req.WithQueryObject(map[string]interface{}{"a": 123, "b": "foo"})
 //	// URL is now http://example.com/path?a=123&b=foo
 func (r *Request) WithQueryObject(object interface{}) *Request {
-	r.chain.enter("WithQueryObject()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithQueryObject()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithQueryObject()") {
 		return r
 	}
 
@@ -934,27 +1250,61 @@ func (r *Request) WithQueryObject(object interface{}) *Request {
 		q   url.Values
 		err error
 	)
-	if reflect.Indirect(reflect.ValueOf(object)).Kind() == reflect.Struct {
+
+	encoder := r.queryEncoder
+	if encoder == defaultQueryEncoder {
+		encoder = selectQueryEncoder(object)
+	}
+
+	switch encoder {
+	case defaultQueryEncoder:
+		// can't happen
+
+	case QueryEncoderGoogle:
 		q, err = query.Values(object)
 		if err != nil {
-			r.chain.fail(AssertionFailure{
+			opChain.fail(AssertionFailure{
 				Type:   AssertValid,
 				Actual: &AssertionValue{object},
 				Errors: []error{
 					errors.New("invalid query object"),
+					errors.New("google/go-querystring encoding failed"),
 					err,
 				},
 			})
 			return r
 		}
-	} else {
-		q, err = form.EncodeToValues(object)
+
+	case QueryEncoderForm, QueryEncoderFormKeepZeros:
+		var b bytes.Buffer
+		enc := form.NewEncoder(&b)
+
+		if encoder == QueryEncoderFormKeepZeros {
+			enc.KeepZeros(true)
+		}
+
+		err = enc.Encode(object)
 		if err != nil {
-			r.chain.fail(AssertionFailure{
+			opChain.fail(AssertionFailure{
 				Type:   AssertValid,
 				Actual: &AssertionValue{object},
 				Errors: []error{
 					errors.New("invalid query object"),
+					errors.New("ajg/form encoding failed"),
+					err,
+				},
+			})
+			return r
+		}
+
+		q, err = url.ParseQuery(b.String())
+		if err != nil {
+			opChain.fail(AssertionFailure{
+				Type:   AssertValid,
+				Actual: &AssertionValue{object},
+				Errors: []error{
+					errors.New("invalid query object"),
+					errors.New("ajg/form produced malformed query"),
 					err,
 				},
 			})
@@ -972,6 +1322,90 @@ func (r *Request) WithQueryObject(object interface{}) *Request {
 	return r
 }
 
+// QueryEncoder defines how to encode object into query in WithQueryObject().
+// If not set, appropriate encoder is selected automatically:
+//   - for structs and pointer to structs, QueryEncoderGoogle is used
+//   - otherwise QueryEncoderAjg is used
+type QueryEncoder int
+
+const (
+	// indicates that WithQueryEncoder was not called
+	defaultQueryEncoder QueryEncoder = iota
+
+	// QueryEncoderGoogle encodes query using google/go-querystring package.
+	// Query object should be a struct annotated with `url` tags.
+	// See https://github.com/google/go-querystring.
+	QueryEncoderGoogle
+
+	// QueryEncoderForm encodes query using ajg/form package.
+	// Query object can be arbitrary type including maps and structs
+	// annotated with `form` tags.
+	// See https://github.com/ajg/form.
+	QueryEncoderForm
+
+	// QueryEncoderFormKeepZeros is same as QueryEncoderForm, but with KeepZeros
+	// flag enabled. With this flag, encoder keeps zero (default) values in their
+	// literal form when encoding, and returns the former; by default zero values
+	// are not kept, but are rather encoded as the empty string.
+	QueryEncoderFormKeepZeros
+)
+
+// WithQueryEncoder forces use of specific encoder or encoder mode when
+// an object is converted to query string in WithQueryObject().
+//
+// See documentation for QueryEncoder enum for evailable encoders.
+//
+// In particular, you can use it to force ajg/form encoder for structs instead
+// of google/go-querystring, or to use KeepZeros mode of the ajg/form encoder.
+//
+// Example:
+//
+//	type MyURL struct {
+//		A int    `form:"a"`
+//		B string `form:"b"`
+//	}
+//
+//	req := NewRequestC(config, "PUT", "http://example.com/path")
+//	req.WithQueryEncoder(QueryEncoderForm)
+//	req.WithQueryObject(MyURL{A: 123, B: "foo"})
+//	// URL is now http://example.com/path?a=123&b=foo
+//
+//	req := NewRequestC(config, "PUT", "http://example.com/path")
+//	req.WithQueryEncoder(QueryEncoderFormKeepZeros)
+//	req.WithQueryObject(map[string]interface{}{"a": 0, "b": 0})
+//	// URL is now http://example.com/path?a=0&b=0
+func (r *Request) WithQueryEncoder(encoder QueryEncoder) *Request {
+	opChain := r.chain.enter("WithQueryEncoder()")
+	defer opChain.leave()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithQueryEncoder()") {
+		return r
+	}
+
+	r.queryEncoder = encoder
+
+	return r
+}
+
+func selectQueryEncoder(object interface{}) QueryEncoder {
+	value := reflect.Indirect(reflect.ValueOf(object))
+
+	if value.Kind() == reflect.Struct {
+		// Use google/go-querystring.
+		return QueryEncoderGoogle
+	}
+
+	// Use ajg/form.
+	return QueryEncoderForm
+}
+
 // WithQueryString parses given query string and adds it to request URL.
 //
 // Example:
@@ -981,17 +1415,24 @@ func (r *Request) WithQueryObject(object interface{}) *Request {
 //	req.WithQueryString("b=22&c=33")
 //	// URL is now http://example.com/path?a=11&bb=22&c=33
 func (r *Request) WithQueryString(query string) *Request {
-	r.chain.enter("WithQueryString()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithQueryString()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithQueryString()") {
 		return r
 	}
 
 	v, err := url.ParseQuery(query)
 
 	if err != nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertValid,
 			Actual: &AssertionValue{query},
 			Errors: []error{
@@ -1023,16 +1464,23 @@ func (r *Request) WithQueryString(query string) *Request {
 //	req.WithURL("http://example.com")
 //	// URL is now http://example.com/path
 func (r *Request) WithURL(urlStr string) *Request {
-	r.chain.enter("WithURL()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithURL()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithURL()") {
 		return r
 	}
 
 	u, err := url.Parse(urlStr)
 	if err != nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertValid,
 			Actual: &AssertionValue{urlStr},
 			Errors: []error{
@@ -1054,13 +1502,20 @@ func (r *Request) WithURL(urlStr string) *Request {
 //
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	req.WithHeaders(map[string]string{
-//	    "Content-Type": "application/json",
+//		"Content-Type": "application/json",
 //	})
 func (r *Request) WithHeaders(headers map[string]string) *Request {
-	r.chain.enter("WithHeaders()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithHeaders()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithHeaders()") {
 		return r
 	}
 
@@ -1078,10 +1533,17 @@ func (r *Request) WithHeaders(headers map[string]string) *Request {
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	req.WithHeader("Content-Type", "application/json")
 func (r *Request) WithHeader(k, v string) *Request {
-	r.chain.enter("WithHeader()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithHeader()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithHeader()") {
 		return r
 	}
 
@@ -1114,14 +1576,21 @@ func (r *Request) withHeader(k, v string) {
 //
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	req.WithCookies(map[string]string{
-//	    "foo": "aa",
-//	    "bar": "bb",
+//		"foo": "aa",
+//		"bar": "bb",
 //	})
 func (r *Request) WithCookies(cookies map[string]string) *Request {
-	r.chain.enter("WithCookies()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithCookies()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithCookies()") {
 		return r
 	}
 
@@ -1142,10 +1611,17 @@ func (r *Request) WithCookies(cookies map[string]string) *Request {
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	req.WithCookie("name", "value")
 func (r *Request) WithCookie(k, v string) *Request {
-	r.chain.enter("WithCookie()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithCookie()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithCookie()") {
 		return r
 	}
 
@@ -1168,10 +1644,17 @@ func (r *Request) WithCookie(k, v string) *Request {
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	req.WithBasicAuth("john", "secret")
 func (r *Request) WithBasicAuth(username, password string) *Request {
-	r.chain.enter("WithBasicAuth()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithBasicAuth()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithBasicAuth()") {
 		return r
 	}
 
@@ -1187,10 +1670,17 @@ func (r *Request) WithBasicAuth(username, password string) *Request {
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	req.WithHost("example.com")
 func (r *Request) WithHost(host string) *Request {
-	r.chain.enter("WithHost()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithHost()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithHost()") {
 		return r
 	}
 
@@ -1208,17 +1698,24 @@ func (r *Request) WithHost(host string) *Request {
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	req.WithProto("HTTP/2.0")
 func (r *Request) WithProto(proto string) *Request {
-	r.chain.enter("WithProto()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithProto()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithProto()") {
 		return r
 	}
 
 	major, minor, ok := http.ParseHTTPVersion(proto)
 
 	if !ok {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertUsage,
 			Errors: []error{
 				fmt.Errorf(
@@ -1251,15 +1748,21 @@ func (r *Request) WithProto(proto string) *Request {
 //	req.WithHeader("Content-Type", "application/octet-stream")
 //	req.WithChunked(fh)
 func (r *Request) WithChunked(reader io.Reader) *Request {
-	r.chain.enter("WithChunked()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithChunked()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
 		return r
 	}
 
+	if !r.checkOrder(opChain, "WithChunked()") {
+		return r
+	}
 	if !r.httpReq.ProtoAtLeast(1, 1) {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertUsage,
 			Errors: []error{
 				fmt.Errorf(
@@ -1271,7 +1774,7 @@ func (r *Request) WithChunked(reader io.Reader) *Request {
 		return r
 	}
 
-	r.setBody("WithChunked()", reader, -1, false)
+	r.setBody(opChain, "WithChunked()", reader, -1, false)
 
 	return r
 }
@@ -1284,17 +1787,24 @@ func (r *Request) WithChunked(reader io.Reader) *Request {
 //	req.WithHeader("Content-Type", "application/json")
 //	req.WithBytes([]byte(`{"foo": 123}`))
 func (r *Request) WithBytes(b []byte) *Request {
-	r.chain.enter("WithBytes()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithBytes()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithBytes()") {
 		return r
 	}
 
 	if b == nil {
-		r.setBody("WithBytes()", nil, 0, false)
+		r.setBody(opChain, "WithBytes()", nil, 0, false)
 	} else {
-		r.setBody("WithBytes()", bytes.NewReader(b), len(b), false)
+		r.setBody(opChain, "WithBytes()", bytes.NewReader(b), len(b), false)
 	}
 
 	return r
@@ -1308,15 +1818,22 @@ func (r *Request) WithBytes(b []byte) *Request {
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	req.WithText("hello, world!")
 func (r *Request) WithText(s string) *Request {
-	r.chain.enter("WithText()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithText()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
 		return r
 	}
 
-	r.setType("WithText()", "text/plain; charset=utf-8", false)
-	r.setBody("WithText()", strings.NewReader(s), len(s), false)
+	if !r.checkOrder(opChain, "WithText()") {
+		return r
+	}
+
+	r.setType(opChain, "WithText()", "text/plain; charset=utf-8", false)
+	r.setBody(opChain, "WithText()", strings.NewReader(s), len(s), false)
 
 	return r
 }
@@ -1327,7 +1844,7 @@ func (r *Request) WithText(s string) *Request {
 // Example:
 //
 //	type MyJSON struct {
-//	    Foo int `json:"foo"`
+//		Foo int `json:"foo"`
 //	}
 //
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
@@ -1336,17 +1853,24 @@ func (r *Request) WithText(s string) *Request {
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	req.WithJSON(map[string]interface{}{"foo": 123})
 func (r *Request) WithJSON(object interface{}) *Request {
-	r.chain.enter("WithJSON()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithJSON()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithJSON()") {
 		return r
 	}
 
 	b, err := json.Marshal(object)
 
 	if err != nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertValid,
 			Actual: &AssertionValue{object},
 			Errors: []error{
@@ -1357,8 +1881,8 @@ func (r *Request) WithJSON(object interface{}) *Request {
 		return r
 	}
 
-	r.setType("WithJSON()", "application/json; charset=utf-8", false)
-	r.setBody("WithJSON()", bytes.NewReader(b), len(b), false)
+	r.setType(opChain, "WithJSON()", "application/json; charset=utf-8", false)
+	r.setBody(opChain, "WithJSON()", bytes.NewReader(b), len(b), false)
 
 	return r
 }
@@ -1377,7 +1901,7 @@ func (r *Request) WithJSON(object interface{}) *Request {
 // Example:
 //
 //	type MyForm struct {
-//	    Foo int `form:"foo"`
+//		Foo int `form:"foo"`
 //	}
 //
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
@@ -1386,17 +1910,24 @@ func (r *Request) WithJSON(object interface{}) *Request {
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	req.WithForm(map[string]interface{}{"foo": 123})
 func (r *Request) WithForm(object interface{}) *Request {
-	r.chain.enter("WithForm()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithForm()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithForm()") {
 		return r
 	}
 
 	f, err := form.EncodeToValues(object)
 
 	if err != nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertValid,
 			Actual: &AssertionValue{object},
 			Errors: []error{
@@ -1408,7 +1939,7 @@ func (r *Request) WithForm(object interface{}) *Request {
 	}
 
 	if r.multipart != nil {
-		r.setType("WithForm()", "multipart/form-data", false)
+		r.setType(opChain, "WithForm()", "multipart/form-data", false)
 
 		var keys []string
 		for k := range f {
@@ -1418,7 +1949,7 @@ func (r *Request) WithForm(object interface{}) *Request {
 
 		for _, k := range keys {
 			if err := r.multipart.WriteField(k, f[k][0]); err != nil {
-				r.chain.fail(AssertionFailure{
+				opChain.fail(AssertionFailure{
 					Type: AssertOperation,
 					Errors: []error{
 						fmt.Errorf("failed to write multipart form field %q", k),
@@ -1429,7 +1960,7 @@ func (r *Request) WithForm(object interface{}) *Request {
 			}
 		}
 	} else {
-		r.setType("WithForm()", "application/x-www-form-urlencoded", false)
+		r.setType(opChain, "WithForm()", "application/x-www-form-urlencoded", false)
 
 		if r.form == nil {
 			r.form = make(url.Values)
@@ -1453,21 +1984,28 @@ func (r *Request) WithForm(object interface{}) *Request {
 //
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	req.WithFormField("foo", 123).
-//	    WithFormField("bar", 456)
+//		WithFormField("bar", 456)
 func (r *Request) WithFormField(key string, value interface{}) *Request {
-	r.chain.enter("WithFormField()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithFormField()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithFormField()") {
 		return r
 	}
 
 	if r.multipart != nil {
-		r.setType("WithFormField()", "multipart/form-data", false)
+		r.setType(opChain, "WithFormField()", "multipart/form-data", false)
 
 		err := r.multipart.WriteField(key, fmt.Sprint(value))
 		if err != nil {
-			r.chain.fail(AssertionFailure{
+			opChain.fail(AssertionFailure{
 				Type: AssertOperation,
 				Errors: []error{
 					fmt.Errorf("failed to write multipart form field %q", key),
@@ -1477,7 +2015,7 @@ func (r *Request) WithFormField(key string, value interface{}) *Request {
 			return r
 		}
 	} else {
-		r.setType("WithFormField()", "application/x-www-form-urlencoded", false)
+		r.setType(opChain, "WithFormField()", "application/x-www-form-urlencoded", false)
 
 		if r.form == nil {
 			r.form = make(url.Values)
@@ -1506,18 +2044,25 @@ func (r *Request) WithFormField(key string, value interface{}) *Request {
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	fh, _ := os.Open("./john.png")
 //	req.WithMultipart().
-//	    WithFile("avatar", "john.png", fh)
+//		WithFile("avatar", "john.png", fh)
 //	fh.Close()
 func (r *Request) WithFile(key, path string, reader ...io.Reader) *Request {
-	r.chain.enter("WithFile()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithFile()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return r
+	}
+
+	if !r.checkOrder(opChain, "WithFile()") {
 		return r
 	}
 
 	if len(reader) > 1 {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertUsage,
 			Errors: []error{
 				errors.New("unexpected multiple reader arguments"),
@@ -1526,7 +2071,7 @@ func (r *Request) WithFile(key, path string, reader ...io.Reader) *Request {
 		return r
 	}
 
-	r.withFile("WithFile()", key, path, reader...)
+	r.withFile(opChain, "WithFile()", key, path, reader...)
 
 	return r
 }
@@ -1538,28 +2083,37 @@ func (r *Request) WithFile(key, path string, reader ...io.Reader) *Request {
 //
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	fh, _ := os.Open("./john.png")
-//	b, _ := ioutil.ReadAll(fh)
+//	b, _ := io.ReadAll(fh)
 //	req.WithMultipart().
-//	    WithFileBytes("avatar", "john.png", b)
+//		WithFileBytes("avatar", "john.png", b)
 //	fh.Close()
 func (r *Request) WithFileBytes(key, path string, data []byte) *Request {
-	r.chain.enter("WithFileBytes()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithFileBytes()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
 		return r
 	}
 
-	r.withFile("WithFileBytes()", key, path, bytes.NewReader(data))
+	if !r.checkOrder(opChain, "WithFileBytes()") {
+		return r
+	}
+
+	r.withFile(opChain, "WithFileBytes()", key, path, bytes.NewReader(data))
 
 	return r
 }
 
-func (r *Request) withFile(method, key, path string, reader ...io.Reader) {
-	r.setType(method, "multipart/form-data", false)
+func (r *Request) withFile(
+	opChain *chain, method, key, path string, reader ...io.Reader,
+) {
+	r.setType(opChain, method, "multipart/form-data", false)
 
 	if r.multipart == nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertUsage,
 			Errors: []error{
 				fmt.Errorf("%s requires WithMultipart() to be called first", method),
@@ -1570,7 +2124,7 @@ func (r *Request) withFile(method, key, path string, reader ...io.Reader) {
 
 	wr, err := r.multipart.CreateFormFile(key, path)
 	if err != nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertOperation,
 			Errors: []error{
 				fmt.Errorf(
@@ -1588,7 +2142,7 @@ func (r *Request) withFile(method, key, path string, reader ...io.Reader) {
 	} else {
 		f, err := os.Open(path)
 		if err != nil {
-			r.chain.fail(AssertionFailure{
+			opChain.fail(AssertionFailure{
 				Type: AssertOperation,
 				Errors: []error{
 					fmt.Errorf("failed to open file %q", path),
@@ -1602,7 +2156,7 @@ func (r *Request) withFile(method, key, path string, reader ...io.Reader) {
 	}
 
 	if _, err := io.Copy(wr, rd); err != nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertOperation,
 			Errors: []error{
 				fmt.Errorf("failed to read file %q", path),
@@ -1627,21 +2181,28 @@ func (r *Request) withFile(method, key, path string, reader ...io.Reader) {
 //
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
 //	req.WithMultipart().
-//	    WithForm(map[string]interface{}{"foo": 123})
+//		WithForm(map[string]interface{}{"foo": 123})
 func (r *Request) WithMultipart() *Request {
-	r.chain.enter("WithMultipart()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("WithMultipart()")
+	defer opChain.leave()
 
-	if r.chain.failed() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
 		return r
 	}
 
-	r.setType("WithMultipart()", "multipart/form-data", false)
+	if !r.checkOrder(opChain, "WithMultipart()") {
+		return r
+	}
+
+	r.setType(opChain, "WithMultipart()", "multipart/form-data", false)
 
 	if r.multipart == nil {
-		r.formbuf = &bytes.Buffer{}
-		r.multipart = multipart.NewWriter(r.formbuf)
-		r.setBody("WithMultipart()", r.formbuf, 0, false)
+		r.formBuf = &bytes.Buffer{}
+		r.multipart = r.multipartFn(r.formBuf)
+		r.setBody(opChain, "WithMultipart()", r.formBuf, 0, false)
 	}
 
 	return r
@@ -1653,6 +2214,9 @@ func (r *Request) WithMultipart() *Request {
 // Request is sent using Client interface, or WebsocketDialer in case of
 // WebSocket request.
 //
+// After calling Expect, there should not be any more calls of Expect or
+// other WithXXX methods on the same Request instance.
+//
 // Example:
 //
 //	req := NewRequestC(config, "PUT", "http://example.com/path")
@@ -1660,16 +2224,33 @@ func (r *Request) WithMultipart() *Request {
 //	resp := req.Expect()
 //	resp.Status(http.StatusOK)
 func (r *Request) Expect() *Response {
-	r.chain.enter("Expect()")
-	defer r.chain.leave()
+	opChain := r.chain.enter("Expect()")
+	defer opChain.leave()
 
-	resp := r.roundTrip()
+	resp := r.expect(opChain)
 
 	if resp == nil {
-		return newResponse(responseOpts{
+		resp = newResponse(responseOpts{
 			config: r.config,
-			chain:  r.chain,
+			chain:  opChain,
 		})
+	}
+
+	return resp
+}
+
+func (r *Request) expect(opChain *chain) *Response {
+	if !r.prepare(opChain) {
+		return nil
+	}
+
+	// after return from prepare(), all subsequent calls to WithXXX and Expect will
+	// abort early due to checkOrder(); so we can safely proceed without a lock
+
+	resp := r.execute(opChain)
+
+	if resp == nil {
+		return nil
 	}
 
 	for _, matcher := range r.matchers {
@@ -1679,19 +2260,40 @@ func (r *Request) Expect() *Response {
 	return resp
 }
 
-func (r *Request) roundTrip() *Response {
-	if !r.encodeRequest() {
+func (r *Request) prepare(opChain *chain) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if opChain.failed() {
+		return false
+	}
+
+	if !r.checkOrder(opChain, "Expect()") {
+		return false
+	}
+
+	r.expectCalled = true
+
+	return true
+}
+
+func (r *Request) execute(opChain *chain) *Response {
+	if !r.encodeRequest(opChain) {
 		return nil
 	}
 
 	if r.wsUpgrade {
-		if !r.encodeWebsocketRequest() {
+		if !r.encodeWebsocketRequest(opChain) {
 			return nil
 		}
 	}
 
-	for _, transform := range r.transforms {
+	for _, transform := range r.transformers {
 		transform(r.httpReq)
+
+		if opChain.failed() {
+			return nil
+		}
 	}
 
 	var (
@@ -1700,9 +2302,9 @@ func (r *Request) roundTrip() *Response {
 		elapsed  time.Duration
 	)
 	if r.wsUpgrade {
-		httpResp, websock, elapsed = r.sendWebsocketRequest()
+		httpResp, websock, elapsed = r.sendWebsocketRequest(opChain)
 	} else {
-		httpResp, elapsed = r.sendRequest()
+		httpResp, elapsed = r.sendRequest(opChain)
 	}
 
 	if httpResp == nil {
@@ -1711,18 +2313,14 @@ func (r *Request) roundTrip() *Response {
 
 	return newResponse(responseOpts{
 		config:    r.config,
-		chain:     r.chain,
+		chain:     opChain,
 		httpResp:  httpResp,
 		websocket: websock,
 		rtt:       []time.Duration{elapsed},
 	})
 }
 
-func (r *Request) encodeRequest() bool {
-	if r.chain.failed() {
-		return false
-	}
-
+func (r *Request) encodeRequest(opChain *chain) bool {
 	r.httpReq.URL.Path = concatPaths(r.httpReq.URL.Path, r.path)
 
 	if r.query != nil {
@@ -1731,7 +2329,7 @@ func (r *Request) encodeRequest() bool {
 
 	if r.multipart != nil {
 		if err := r.multipart.Close(); err != nil {
-			r.chain.fail(AssertionFailure{
+			opChain.fail(AssertionFailure{
 				Type: AssertOperation,
 				Errors: []error{
 					errors.New("failed to close multipart form"),
@@ -1741,11 +2339,12 @@ func (r *Request) encodeRequest() bool {
 			return false
 		}
 
-		r.setType("Expect()", r.multipart.FormDataContentType(), true)
-		r.setBody("Expect()", r.formbuf, r.formbuf.Len(), true)
+		r.setType(opChain, "Expect()", r.multipart.FormDataContentType(), true)
+		r.setBody(opChain, "Expect()", r.formBuf, r.formBuf.Len(), true)
 	} else if r.form != nil {
 		s := r.form.Encode()
-		r.setBody("WithForm() or WithFormField()", strings.NewReader(s), len(s), false)
+		r.setBody(opChain,
+			"WithForm() or WithFormField()", strings.NewReader(s), len(s), false)
 	}
 
 	if r.httpReq.Body == nil {
@@ -1756,7 +2355,7 @@ func (r *Request) encodeRequest() bool {
 		r.httpReq = r.httpReq.WithContext(r.config.Context)
 	}
 
-	r.setupRedirects()
+	r.setupRedirects(opChain)
 
 	return true
 }
@@ -1765,13 +2364,9 @@ var websocketErr = `webocket request can not have body:
   body was set by %s
   webocket was enabled by WithWebsocketUpgrade()`
 
-func (r *Request) encodeWebsocketRequest() bool {
-	if r.chain.failed() {
-		return false
-	}
-
+func (r *Request) encodeWebsocketRequest(opChain *chain) bool {
 	if r.bodySetter != "" {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertUsage,
 			Errors: []error{
 				fmt.Errorf(websocketErr, r.bodySetter),
@@ -1790,17 +2385,13 @@ func (r *Request) encodeWebsocketRequest() bool {
 	return true
 }
 
-func (r *Request) sendRequest() (*http.Response, time.Duration) {
-	if r.chain.failed() {
-		return nil, 0
-	}
-
+func (r *Request) sendRequest(opChain *chain) (*http.Response, time.Duration) {
 	resp, elapsed, err := r.retryRequest(func() (*http.Response, error) {
 		return r.config.Client.Do(r.httpReq)
 	})
 
 	if err != nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertOperation,
 			Errors: []error{
 				errors.New("failed to send http request"),
@@ -1813,13 +2404,9 @@ func (r *Request) sendRequest() (*http.Response, time.Duration) {
 	return resp, elapsed
 }
 
-func (r *Request) sendWebsocketRequest() (
+func (r *Request) sendWebsocketRequest(opChain *chain) (
 	*http.Response, *websocket.Conn, time.Duration,
 ) {
-	if r.chain.failed() {
-		return nil, nil, 0
-	}
-
 	var conn *websocket.Conn
 	resp, elapsed, err := r.retryRequest(func() (resp *http.Response, err error) {
 		conn, resp, err = r.config.WebsocketDialer.Dial(
@@ -1828,7 +2415,7 @@ func (r *Request) sendWebsocketRequest() (
 	})
 
 	if err != nil && err != websocket.ErrBadHandshake {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertOperation,
 			Errors: []error{
 				errors.New("failed to send websocket request"),
@@ -1839,7 +2426,7 @@ func (r *Request) sendWebsocketRequest() (
 	}
 
 	if conn == nil {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertOperation,
 			Errors: []error{
 				errors.New("failed to upgrade connection to websocket"),
@@ -1870,7 +2457,13 @@ func (r *Request) retryRequest(reqFunc func() (*http.Response, error)) (
 			if reqBody != nil {
 				reqBody.Rewind()
 			}
-			printer.Request(r.httpReq)
+			// Make a copy to avoid accidental modification of request.
+			// In particular, httputil.DumpRequest reads sets request body into a buffer
+			// and set req.Body to a wrapper that will re-read body from buffer.
+			// It breaks our bodyWrapper logic as we don't expect that someone will
+			// replace bodyWrapper with something else.
+			httpReqCopy := *r.httpReq
+			printer.Request(&httpReqCopy)
 		}
 
 		if reqBody != nil {
@@ -1905,7 +2498,10 @@ func (r *Request) retryRequest(reqFunc func() (*http.Response, error)) (
 				if resp.Body != nil {
 					resp.Body.(*bodyWrapper).Rewind()
 				}
-				printer.Response(resp, elapsed)
+				// Make a copy to avoid accidental modification of request.
+				// See comment above.
+				httpRespCopy := *resp
+				printer.Response(&httpRespCopy, elapsed)
 			}
 		}
 
@@ -1940,23 +2536,37 @@ func (r *Request) retryRequest(reqFunc func() (*http.Response, error)) (
 }
 
 func (r *Request) shouldRetry(resp *http.Response, err error) bool {
+	if r.retryPolicyFn != nil {
+		return r.retryPolicyFn(resp, err) // set by WithRetryPolicyFunc
+	}
+
 	var (
-		isTemporaryNetworkError bool
-		isTemporaryServerError  bool
+		isTemporaryNetworkError bool // Deprecated
+		isTimeoutError          bool
+		isServerError           bool
 		isHTTPError             bool
 	)
 
 	if netErr, ok := err.(net.Error); ok {
 		//nolint
 		isTemporaryNetworkError = netErr.Temporary()
+		isTimeoutError = netErr.Timeout()
 	}
 
 	if resp != nil {
-		isTemporaryServerError = resp.StatusCode >= 500 && resp.StatusCode <= 599
+		isServerError = resp.StatusCode >= 500 && resp.StatusCode <= 599
 		isHTTPError = resp.StatusCode >= 400 && resp.StatusCode <= 599
 	}
 
-	switch r.retryPolicy {
+	policy := r.retryPolicy // set by WithRetryPolicy
+	if r.retryPolicy == defaultRetryPolicy {
+		policy = RetryTimeoutAndServerErrors
+	}
+
+	switch policy {
+	case defaultRetryPolicy:
+		// can't happen
+
 	case DontRetry:
 		break
 
@@ -1964,7 +2574,13 @@ func (r *Request) shouldRetry(resp *http.Response, err error) bool {
 		return isTemporaryNetworkError
 
 	case RetryTemporaryNetworkAndServerErrors:
-		return isTemporaryNetworkError || isTemporaryServerError
+		return isTemporaryNetworkError || isServerError
+
+	case RetryTimeoutErrors:
+		return isTimeoutError
+
+	case RetryTimeoutAndServerErrors:
+		return isTimeoutError || isServerError
 
 	case RetryAllErrors:
 		return err != nil || isHTTPError
@@ -1973,12 +2589,12 @@ func (r *Request) shouldRetry(resp *http.Response, err error) bool {
 	return false
 }
 
-func (r *Request) setupRedirects() {
+func (r *Request) setupRedirects(opChain *chain) {
 	httpClient, _ := r.config.Client.(*http.Client)
 
 	if httpClient == nil {
 		if r.redirectPolicy != defaultRedirectPolicy {
-			r.chain.fail(AssertionFailure{
+			opChain.fail(AssertionFailure{
 				Type: AssertUsage,
 				Errors: []error{
 					errors.New(
@@ -1989,7 +2605,7 @@ func (r *Request) setupRedirects() {
 		}
 
 		if r.maxRedirects != -1 {
-			r.chain.fail(AssertionFailure{
+			opChain.fail(AssertionFailure{
 				Type: AssertUsage,
 				Errors: []error{
 					errors.New(
@@ -2026,7 +2642,8 @@ func (r *Request) setupRedirects() {
 			if _, ok := r.httpReq.Body.(*bodyWrapper); !ok {
 				r.httpReq.Body = newBodyWrapper(r.httpReq.Body, nil)
 			}
-			r.httpReq.GetBody = r.httpReq.Body.(*bodyWrapper).GetBody
+			wrapper := r.httpReq.Body.(*bodyWrapper)
+			r.httpReq.GetBody = wrapper.GetBody
 		} else {
 			r.httpReq.GetBody = func() (io.ReadCloser, error) {
 				return http.NoBody, nil
@@ -2043,7 +2660,9 @@ var typeErr = `ambiguous request "Content-Type" header values:
   then replaced by %s:
     %q`
 
-func (r *Request) setType(newSetter, newType string, overwrite bool) {
+func (r *Request) setType(
+	opChain *chain, newSetter, newType string, overwrite bool,
+) {
 	if r.forceType {
 		return
 	}
@@ -2052,7 +2671,7 @@ func (r *Request) setType(newSetter, newType string, overwrite bool) {
 		previousType := r.httpReq.Header.Get("Content-Type")
 
 		if previousType != "" && previousType != newType {
-			r.chain.fail(AssertionFailure{
+			opChain.fail(AssertionFailure{
 				Type: AssertUsage,
 				Errors: []error{
 					fmt.Errorf(typeErr,
@@ -2071,9 +2690,11 @@ var bodyErr = `ambiguous request body contents:
   first set by %s
   then replaced by %s`
 
-func (r *Request) setBody(setter string, reader io.Reader, len int, overwrite bool) {
+func (r *Request) setBody(
+	opChain *chain, setter string, reader io.Reader, length int, overwrite bool,
+) {
 	if !overwrite && r.bodySetter != "" {
-		r.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type: AssertUsage,
 			Errors: []error{
 				fmt.Errorf(bodyErr, r.bodySetter, setter),
@@ -2082,7 +2703,7 @@ func (r *Request) setBody(setter string, reader io.Reader, len int, overwrite bo
 		return
 	}
 
-	if len > 0 && reader == nil {
+	if length > 0 && reader == nil {
 		panic("invalid length")
 	}
 
@@ -2090,11 +2711,24 @@ func (r *Request) setBody(setter string, reader io.Reader, len int, overwrite bo
 		r.httpReq.Body = http.NoBody
 		r.httpReq.ContentLength = 0
 	} else {
-		r.httpReq.Body = ioutil.NopCloser(reader)
-		r.httpReq.ContentLength = int64(len)
+		r.httpReq.Body = io.NopCloser(reader)
+		r.httpReq.ContentLength = int64(length)
 	}
 
 	r.bodySetter = setter
+}
+
+func (r *Request) checkOrder(opChain *chain, funcCall string) bool {
+	if r.expectCalled {
+		opChain.fail(AssertionFailure{
+			Type: AssertUsage,
+			Errors: []error{
+				fmt.Errorf("unexpected call to %s: Expect() has already been called", funcCall),
+			},
+		})
+		return false
+	}
+	return true
 }
 
 func concatPaths(a, b string) string {

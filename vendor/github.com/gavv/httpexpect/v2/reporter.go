@@ -2,6 +2,7 @@ package httpexpect
 
 import (
 	"fmt"
+	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,4 +38,37 @@ func NewRequireReporter(t require.TestingT) *RequireReporter {
 // Errorf implements Reporter.Errorf.
 func (r *RequireReporter) Errorf(message string, args ...interface{}) {
 	r.backend.FailNow(fmt.Sprintf(message, args...))
+}
+
+// FatalReporter is a struct that implements the Reporter interface
+// and calls t.Fatalf() when a test fails.
+type FatalReporter struct {
+	backend testing.TB
+}
+
+// NewFatalReporter returns a new FatalReporter object.
+func NewFatalReporter(t testing.TB) *FatalReporter {
+	return &FatalReporter{t}
+}
+
+// Errorf implements Reporter.Errorf.
+func (r *FatalReporter) Errorf(message string, args ...interface{}) {
+	r.backend.Fatalf("%s", fmt.Sprintf(message, args...))
+}
+
+// PanicReporter is a struct that implements the Reporter interface
+// and panics when a test fails.
+// Useful for multithreaded tests when you want to report fatal
+// failures from goroutines other than the main goroutine, because
+// the main goroutine is forbidden to call t.Fatal.
+type PanicReporter struct{}
+
+// NewPanicReporter returns a new PanicReporter object.
+func NewPanicReporter() *PanicReporter {
+	return &PanicReporter{}
+}
+
+// Errorf implements Reporter.Errorf
+func (r *PanicReporter) Errorf(message string, args ...interface{}) {
+	panic(fmt.Sprintf(message, args...))
 }

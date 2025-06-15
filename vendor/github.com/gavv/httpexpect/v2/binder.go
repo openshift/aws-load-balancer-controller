@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -32,7 +32,7 @@ type Binder struct {
 // Example:
 //
 //	client := &http.Client{
-//	    Transport: NewBinder(handler),
+//		Transport: NewBinder(handler),
 //	}
 func NewBinder(handler http.Handler) Binder {
 	return Binder{Handler: handler}
@@ -78,7 +78,7 @@ func (binder Binder) RoundTrip(origReq *http.Request) (*http.Response, error) {
 	}
 
 	if recorder.Body != nil {
-		resp.Body = ioutil.NopCloser(recorder.Body)
+		resp.Body = io.NopCloser(recorder.Body)
 	}
 
 	return &resp, nil
@@ -104,7 +104,7 @@ type FastBinder struct {
 // Example:
 //
 //	client := &http.Client{
-//	    Transport: NewFastBinder(fasthandler),
+//		Transport: NewFastBinder(fasthandler),
 //	}
 func NewFastBinder(handler fasthttp.RequestHandler) FastBinder {
 	return FastBinder{Handler: handler}
@@ -148,7 +148,7 @@ func (binder FastBinder) RoundTrip(stdreq *http.Request) (*http.Response, error)
 	}
 
 	if stdreq.Body != nil {
-		b, err := ioutil.ReadAll(stdreq.Body)
+		b, err := io.ReadAll(stdreq.Body)
 		if err == nil {
 			ctx.Request.SetBody(b)
 		}
@@ -219,9 +219,9 @@ func fast2std(stdreq *http.Request, fastresp *fasthttp.Response) *http.Response 
 	}
 
 	if body != nil {
-		stdresp.Body = ioutil.NopCloser(bytes.NewReader(body))
+		stdresp.Body = io.NopCloser(bytes.NewReader(body))
 	} else {
-		stdresp.Body = ioutil.NopCloser(bytes.NewReader(nil))
+		stdresp.Body = io.NopCloser(bytes.NewReader(nil))
 	}
 
 	return stdresp

@@ -2,7 +2,11 @@ package httpexpect
 
 import (
 	"errors"
+	"sort"
+	"sync"
 	"time"
+
+	"github.com/gobwas/glob"
 )
 
 // Environment provides a container for arbitrary data shared between tests.
@@ -13,9 +17,9 @@ import (
 //	env.Put("key", "value")
 //	value := env.GetString("key")
 type Environment struct {
-	noCopy noCopy
-	chain  *chain
-	data   map[string]interface{}
+	mu    sync.RWMutex
+	chain *chain
+	data  map[string]interface{}
 }
 
 // NewEnvironment returns a new Environment.
@@ -55,10 +59,48 @@ func newEnvironment(parent *chain) *Environment {
 //	env.Put("key1", "str")
 //	env.Put("key2", 123)
 func (e *Environment) Put(key string, value interface{}) {
-	e.chain.enter("Put(%q)", key)
-	defer e.chain.leave()
+	opChain := e.chain.enter("Put(%q)", key)
+	defer opChain.leave()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
 	e.data[key] = value
+}
+
+// Delete removes the value with key from the environment.
+//
+// Example:
+//
+//	env := NewEnvironment(t)
+//	env.Put("key1", "str")
+//	env.Delete("key1")
+func (e *Environment) Delete(key string) {
+	opChain := e.chain.enter("Delete(%q)", key)
+	defer opChain.leave()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	delete(e.data, key)
+}
+
+// Clear will delete all key value pairs from the environment
+//
+// Example:
+//
+//	env := NewEnvironment(t)
+//	env.Put("key1", 123)
+//	env.Put("key2", 456)
+//	env.Clear()
+func (e *Environment) Clear() {
+	opChain := e.chain.enter("Clear()")
+	defer opChain.leave()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.data = make(map[string]interface{})
 }
 
 // Has returns true if value exists in the environment.
@@ -69,8 +111,11 @@ func (e *Environment) Put(key string, value interface{}) {
 //	   ...
 //	}
 func (e *Environment) Has(key string) bool {
-	e.chain.enter("Has(%q)", key)
-	defer e.chain.leave()
+	opChain := e.chain.enter("Has(%q)", key)
+	defer opChain.leave()
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 
 	_, ok := e.data[key]
 	return ok
@@ -85,10 +130,13 @@ func (e *Environment) Has(key string) bool {
 //	value1 := env.Get("key1").(string)
 //	value2 := env.Get("key1").(int)
 func (e *Environment) Get(key string) interface{} {
-	e.chain.enter("Get(%q)", key)
-	defer e.chain.leave()
+	opChain := e.chain.enter("Get(%q)", key)
+	defer opChain.leave()
 
-	value, _ := e.getValue(key)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	value, _ := envValue(opChain, e.data, key)
 
 	return value
 }
@@ -101,17 +149,20 @@ func (e *Environment) Get(key string) interface{} {
 //
 //	value := env.GetBool("key")
 func (e *Environment) GetBool(key string) bool {
-	e.chain.enter("GetBool(%q)", key)
-	defer e.chain.leave()
+	opChain := e.chain.enter("GetBool(%q)", key)
+	defer opChain.leave()
 
-	value, ok := e.getValue(key)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	value, ok := envValue(opChain, e.data, key)
 	if !ok {
 		return false
 	}
 
 	casted, ok := value.(bool)
 	if !ok {
-		e.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertType,
 			Actual: &AssertionValue{value},
 			Errors: []error{
@@ -133,10 +184,13 @@ func (e *Environment) GetBool(key string) bool {
 //
 //	value := env.GetInt("key")
 func (e *Environment) GetInt(key string) int {
-	e.chain.enter("GetInt(%q)", key)
-	defer e.chain.leave()
+	opChain := e.chain.enter("GetInt(%q)", key)
+	defer opChain.leave()
 
-	value, ok := e.getValue(key)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	value, ok := envValue(opChain, e.data, key)
 	if !ok {
 		return 0
 	}
@@ -183,7 +237,7 @@ func (e *Environment) GetInt(key string) int {
 		ok = (uint64(num) <= maxInt)
 
 	default:
-		e.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertType,
 			Actual: &AssertionValue{value},
 			Errors: []error{
@@ -194,7 +248,7 @@ func (e *Environment) GetInt(key string) int {
 	}
 
 	if !ok {
-		e.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:     AssertInRange,
 			Actual:   &AssertionValue{value},
 			Expected: &AssertionValue{AssertionRange{minInt, maxInt}},
@@ -218,10 +272,13 @@ func (e *Environment) GetInt(key string) int {
 //
 //	value := env.GetFloat("key")
 func (e *Environment) GetFloat(key string) float64 {
-	e.chain.enter("GetFloat(%q)", key)
-	defer e.chain.leave()
+	opChain := e.chain.enter("GetFloat(%q)", key)
+	defer opChain.leave()
 
-	value, ok := e.getValue(key)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	value, ok := envValue(opChain, e.data, key)
 	if !ok {
 		return 0
 	}
@@ -236,7 +293,7 @@ func (e *Environment) GetFloat(key string) float64 {
 		casted = num
 
 	default:
-		e.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertType,
 			Actual: &AssertionValue{value},
 			Errors: []error{
@@ -258,17 +315,20 @@ func (e *Environment) GetFloat(key string) float64 {
 //
 //	value := env.GetString("key")
 func (e *Environment) GetString(key string) string {
-	e.chain.enter("GetString(%q)", key)
-	defer e.chain.leave()
+	opChain := e.chain.enter("GetString(%q)", key)
+	defer opChain.leave()
 
-	value, ok := e.getValue(key)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	value, ok := envValue(opChain, e.data, key)
 	if !ok {
 		return ""
 	}
 
 	casted, ok := value.(string)
 	if !ok {
-		e.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertType,
 			Actual: &AssertionValue{value},
 			Errors: []error{
@@ -289,17 +349,20 @@ func (e *Environment) GetString(key string) string {
 //
 //	value := env.GetBytes("key")
 func (e *Environment) GetBytes(key string) []byte {
-	e.chain.enter("GetBytes(%q)", key)
-	defer e.chain.leave()
+	opChain := e.chain.enter("GetBytes(%q)", key)
+	defer opChain.leave()
 
-	value, ok := e.getValue(key)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	value, ok := envValue(opChain, e.data, key)
 	if !ok {
 		return nil
 	}
 
 	casted, ok := value.([]byte)
 	if !ok {
-		e.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertType,
 			Actual: &AssertionValue{value},
 			Errors: []error{
@@ -321,17 +384,20 @@ func (e *Environment) GetBytes(key string) []byte {
 //
 //	value := env.GetDuration("key")
 func (e *Environment) GetDuration(key string) time.Duration {
-	e.chain.enter("GetDuration(%q)", key)
-	defer e.chain.leave()
+	opChain := e.chain.enter("GetDuration(%q)", key)
+	defer opChain.leave()
 
-	value, ok := e.getValue(key)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	value, ok := envValue(opChain, e.data, key)
 	if !ok {
 		return time.Duration(0)
 	}
 
 	casted, ok := value.(time.Duration)
 	if !ok {
-		e.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertType,
 			Actual: &AssertionValue{value},
 			Errors: []error{
@@ -353,17 +419,20 @@ func (e *Environment) GetDuration(key string) time.Duration {
 //
 //	value := env.GetTime("key")
 func (e *Environment) GetTime(key string) time.Time {
-	e.chain.enter("GetTime(%q)", key)
-	defer e.chain.leave()
+	opChain := e.chain.enter("GetTime(%q)", key)
+	defer opChain.leave()
 
-	value, ok := e.getValue(key)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	value, ok := envValue(opChain, e.data, key)
 	if !ok {
 		return time.Unix(0, 0)
 	}
 
 	casted, ok := value.(time.Time)
 	if !ok {
-		e.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertType,
 			Actual: &AssertionValue{value},
 			Errors: []error{
@@ -376,13 +445,85 @@ func (e *Environment) GetTime(key string) time.Time {
 	return casted
 }
 
-func (e *Environment) getValue(key string) (interface{}, bool) {
-	v, ok := e.data[key]
+// List returns a sorted slice of keys.
+//
+// Example:
+//
+//	env := NewEnvironment(t)
+//
+//	for _, key := range env.List() {
+//		...
+//	}
+func (e *Environment) List() []string {
+	opChain := e.chain.enter("List()")
+	defer opChain.leave()
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	keys := []string{}
+
+	for key := range e.data {
+		keys = append(keys, key)
+	}
+
+	sort.Slice(keys, func(i, j int) bool {
+		return keys[i] < keys[j]
+	})
+	return keys
+}
+
+// Glob accepts a glob pattern and returns a sorted slice of
+// keys that match the pattern.
+//
+// If the pattern is invalid, reports failure and returns an
+// empty slice.
+//
+// Example:
+//
+//	env := NewEnvironment(t)
+//
+//	for _, key := range env.Glob("foo.*") {
+//		...
+//	}
+func (e *Environment) Glob(pattern string) []string {
+	opChain := e.chain.enter("Glob(%q)", pattern)
+	defer opChain.leave()
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	glb, err := glob.Compile(pattern)
+	if err != nil {
+		opChain.fail(AssertionFailure{
+			Type: AssertUsage,
+			Errors: []error{
+				errors.New("unexpected invalid glob pattern"),
+			},
+		})
+		return []string{}
+	}
+
+	keys := []string{}
+	for key := range e.data {
+		if glb.Match(key) {
+			keys = append(keys, key)
+		}
+	}
+
+	sort.Slice(keys, func(i, j int) bool {
+		return keys[i] < keys[j]
+	})
+	return keys
+}
+
+func envValue(chain *chain, env map[string]interface{}, key string) (interface{}, bool) {
+	v, ok := env[key]
 
 	if !ok {
-		e.chain.fail(AssertionFailure{
+		chain.fail(AssertionFailure{
 			Type:     AssertContainsKey,
-			Actual:   &AssertionValue{e.data},
+			Actual:   &AssertionValue{env},
 			Expected: &AssertionValue{key},
 			Errors: []error{
 				errors.New("expected: environment contains key"),

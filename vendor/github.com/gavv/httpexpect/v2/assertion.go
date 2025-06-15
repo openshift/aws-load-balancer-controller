@@ -117,6 +117,12 @@ type AssertionContext struct {
 	//   {`Request("GET")`, `Expect()`, `JSON()`, `NotNull()`}
 	Path []string
 
+	// Chain of nested assertion names starting from alias
+	// When alias is not set, AliasedPath has the same value as Path
+	// Example value:
+	//   {`foo`, `NotNull()`} // alias named foo
+	AliasedPath []string
+
 	// Request being sent
 	// May be nil if request was not yet sent
 	Request *Request
@@ -128,6 +134,10 @@ type AssertionContext struct {
 	// Environment shared between tests
 	// Comes from Expect instance
 	Environment *Environment
+
+	// Whether reporter is known to output to testing.TB
+	// For example, true when reporter is testing.T or testify-based reporter.
+	TestingTB bool
 }
 
 // AssertionFailure provides detailed information about failed assertion.
@@ -182,6 +192,9 @@ type AssertionFailure struct {
 
 	// Allowed delta between actual and expected
 	Delta *AssertionValue
+
+	// Stacktrace of the failure
+	Stacktrace []StacktraceEntry
 }
 
 // AssertionValue holds expected or actual value
@@ -219,9 +232,9 @@ type AssertionHandler interface {
 
 // DefaultAssertionHandler is default implementation for AssertionHandler.
 //
-// - Formatter is used to format success and failure messages
-// - Reporter is used to report formatted fatal failure messages
-// - Logger is used to print formatted success and non-fatal failure messages
+//   - Formatter is used to format success and failure messages
+//   - Reporter is used to report formatted fatal failure messages
+//   - Logger is used to print formatted success and non-fatal failure messages
 //
 // Formatter and Reporter are required. Logger is optional.
 // By default httpexpect creates DefaultAssertionHandler without Logger.

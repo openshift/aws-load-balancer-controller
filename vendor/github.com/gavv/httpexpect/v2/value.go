@@ -21,22 +21,22 @@ type Value struct {
 // Example:
 //
 //	value := NewValue(t, map[string]interface{}{"foo": 123})
-//	value.Object()
+//	value.IsObject()
 //
 //	value := NewValue(t, []interface{}{"foo", 123})
-//	value.Array()
+//	value.IsArray()
 //
 //	value := NewValue(t, "foo")
-//	value.String()
+//	value.IsString()
 //
 //	value := NewValue(t, 123)
-//	value.Number()
+//	value.IsNumber()
 //
 //	value := NewValue(t, true)
-//	value.Boolean()
+//	value.IsBoolean()
 //
 //	value := NewValue(t, nil)
-//	value.Null()
+//	value.IsNull()
 func NewValue(reporter Reporter, value interface{}) *Value {
 	return newValue(newChainWithDefaults("Value()", reporter), value)
 }
@@ -46,25 +46,7 @@ func NewValue(reporter Reporter, value interface{}) *Value {
 // Requirements for config are same as for WithConfig function.
 // Value may be nil.
 //
-// Example:
-//
-//	value := NewValueC(config, map[string]interface{}{"foo": 123})
-//	value.Object()
-//
-//	value := NewValueC(config, []interface{}{"foo", 123})
-//	value.Array()
-//
-//	value := NewValueC(config, "foo")
-//	value.String()
-//
-//	value := NewValueC(config, 123)
-//	value.Number()
-//
-//	value := NewValueC(config, true)
-//	value.Boolean()
-//
-//	value := NewValueC(config, nil)
-//	value.Null()
+// See NewValue for usage example.
 func NewValueC(config Config, value interface{}) *Value {
 	return newValue(newChainWithConfig("Value()", config.withDefaults()), value)
 }
@@ -72,8 +54,11 @@ func NewValueC(config Config, value interface{}) *Value {
 func newValue(parent *chain, val interface{}) *Value {
 	v := &Value{parent.clone(), nil}
 
+	opChain := v.chain.enter("")
+	defer opChain.leave()
+
 	if val != nil {
-		v.value, _ = canonValue(v.chain, val)
+		v.value, _ = canonValue(opChain, val)
 	}
 
 	return v
@@ -88,6 +73,70 @@ func newValue(parent *chain, val interface{}) *Value {
 //	assert.Equal(t, "foo", number.Raw().(string))
 func (v *Value) Raw() interface{} {
 	return v.value
+}
+
+// Decode unmarshals the underlying value attached to the Object to a target variable
+// target should be pointer to any type.
+//
+// Example:
+//
+//	type S struct {
+//		Foo int             `json:"foo"`
+//		Bar []interface{}   `json:"bar"`
+//		Baz struct{ A int } `json:"baz"`
+//	}
+//
+//	m := map[string]interface{}{
+//		"foo": 123,
+//		"bar": []interface{}{"123", 456.0},
+//		"baz": struct{ A int }{123},
+//	}
+//
+//	value = NewValue(reporter,m)
+//
+//	var target S
+//	value.Decode(&target)
+//
+//	assert.Equal(t, S{123, []interface{}{"123", 456.0}, struct{ A int }{123}, target})
+func (v *Value) Decode(target interface{}) *Value {
+	opChain := v.chain.enter("Decode()")
+	defer opChain.leave()
+
+	if opChain.failed() {
+		return v
+	}
+
+	canonDecode(opChain, v.value, target)
+	return v
+}
+
+// Alias returns a new Value object with alias.
+// When a test of Value object with alias is failed,
+// an assertion is displayed as a chain starting from the alias.
+//
+// Example:
+//
+//	// In this example, GET /example responds "foo"
+//	foo := e.GET("/example").Expect().Status(http.StatusOK).JSON().Object()
+//
+//	// When a test is failed, an assertion without alias is
+//	// Request("GET").Expect().JSON().Object().IsEqual()
+//	foo.IsEqual("bar")
+//
+//	// Set Alias
+//	fooWithAlias := e.GET("/example").
+//		Expect().
+//		Status(http.StatusOK).JSON().Object().Alias("foo")
+//
+//	// When a test is failed, an assertion with alias is
+//	// foo.IsEqual()
+//	fooWithAlias.IsEqual("bar")
+func (v *Value) Alias(name string) *Value {
+	opChain := v.chain.enter("Alias(%q)", name)
+	defer opChain.leave()
+
+	v.chain.setAlias(name)
+	return v
 }
 
 // Path returns a new Value object for child object(s) matching given
@@ -105,8 +154,8 @@ func (v *Value) Raw() interface{} {
 //	json := `{"users": [{"name": "john"}, {"name": "bob"}]}`
 //	value := NewValue(t, json)
 //
-//	value.Path("$.users[0].name").String().Equal("john")
-//	value.Path("$.users[1].name").String().Equal("bob")
+//	value.Path("$.users[0].name").String().IsEqual("john")
+//	value.Path("$.users[1].name").String().IsEqual("bob")
 //
 // Example 2:
 //
@@ -114,13 +163,13 @@ func (v *Value) Raw() interface{} {
 //	value := NewValue(t, json)
 //
 //	for _, user := range value.Path("$..user").Array().Iter() {
-//	    user.String().Equal("john")
+//		user.String().IsEqual("john")
 //	}
 func (v *Value) Path(path string) *Value {
-	v.chain.enter("Path(%q)", path)
-	defer v.chain.leave()
+	opChain := v.chain.enter("Path(%q)", path)
+	defer opChain.leave()
 
-	return jsonPath(v.chain, v.value, path)
+	return jsonPath(opChain, v.value, path)
 }
 
 // Schema succeeds if value matches given JSON Schema.
@@ -140,19 +189,19 @@ func (v *Value) Path(path string) *Value {
 //	 schema := `{
 //	   "type": "object",
 //	   "properties": {
-//	      "foo": {
-//	          "type": "string"
-//	      },
-//	      "bar": {
-//	          "type": "integer"
-//	      }
+//		  "foo": {
+//			  "type": "string"
+//		  },
+//		  "bar": {
+//			  "type": "integer"
+//		  }
 //	  },
 //	  "require": ["foo", "bar"]
 //	}`
 //
 //	value := NewValue(t, map[string]interface{}{
-//	    "foo": "a",
-//	    "bar": 1,
+//		"foo": "a",
+//		"bar": 1,
 //	})
 //
 //	value.Schema(schema)
@@ -162,10 +211,10 @@ func (v *Value) Path(path string) *Value {
 //	value := NewValue(t, data)
 //	value.Schema("http://example.com/schema.json")
 func (v *Value) Schema(schema interface{}) *Value {
-	v.chain.enter("Schema()")
-	defer v.chain.leave()
+	opChain := v.chain.enter("Schema()")
+	defer opChain.leave()
 
-	jsonSchema(v.chain, v.value, schema)
+	jsonSchema(opChain, v.value, schema)
 	return v
 }
 
@@ -179,27 +228,27 @@ func (v *Value) Schema(schema interface{}) *Value {
 //	value := NewValue(t, map[string]interface{}{"foo": 123})
 //	value.Object().ContainsKey("foo")
 func (v *Value) Object() *Object {
-	v.chain.enter("Object()")
-	defer v.chain.leave()
+	opChain := v.chain.enter("Object()")
+	defer opChain.leave()
 
-	if v.chain.failed() {
-		return newObject(v.chain, nil)
+	if opChain.failed() {
+		return newObject(opChain, nil)
 	}
 
 	data, ok := v.value.(map[string]interface{})
 
 	if !ok {
-		v.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertValid,
 			Actual: &AssertionValue{v.value},
 			Errors: []error{
-				errors.New("expected: value is map"),
+				errors.New("expected: value is object"),
 			},
 		})
-		return newObject(v.chain, nil)
+		return newObject(opChain, nil)
 	}
 
-	return newObject(v.chain, data)
+	return newObject(opChain, data)
 }
 
 // Array returns a new Array attached to underlying value.
@@ -210,29 +259,29 @@ func (v *Value) Object() *Object {
 // Example:
 //
 //	value := NewValue(t, []interface{}{"foo", 123})
-//	value.Array().Elements("foo", 123)
+//	value.Array().ConsistsOf("foo", 123)
 func (v *Value) Array() *Array {
-	v.chain.enter("Array()")
-	defer v.chain.leave()
+	opChain := v.chain.enter("Array()")
+	defer opChain.leave()
 
-	if v.chain.failed() {
-		return newArray(v.chain, nil)
+	if opChain.failed() {
+		return newArray(opChain, nil)
 	}
 
 	data, ok := v.value.([]interface{})
 
 	if !ok {
-		v.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertValid,
 			Actual: &AssertionValue{v.value},
 			Errors: []error{
 				errors.New("expected: value is array"),
 			},
 		})
-		return newArray(v.chain, nil)
+		return newArray(opChain, nil)
 	}
 
-	return newArray(v.chain, data)
+	return newArray(opChain, data)
 }
 
 // String returns a new String attached to underlying value.
@@ -243,29 +292,29 @@ func (v *Value) Array() *Array {
 // Example:
 //
 //	value := NewValue(t, "foo")
-//	value.String().EqualFold("FOO")
+//	value.String().IsEqualFold("FOO")
 func (v *Value) String() *String {
-	v.chain.enter("String()")
-	defer v.chain.leave()
+	opChain := v.chain.enter("String()")
+	defer opChain.leave()
 
-	if v.chain.failed() {
-		return newString(v.chain, "")
+	if opChain.failed() {
+		return newString(opChain, "")
 	}
 
 	data, ok := v.value.(string)
 
 	if !ok {
-		v.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertValid,
 			Actual: &AssertionValue{v.value},
 			Errors: []error{
 				errors.New("expected: value is string"),
 			},
 		})
-		return newString(v.chain, "")
+		return newString(opChain, "")
 	}
 
-	return newString(v.chain, data)
+	return newString(opChain, data)
 }
 
 // Number returns a new Number attached to underlying value.
@@ -278,27 +327,27 @@ func (v *Value) String() *String {
 //	value := NewValue(t, 123)
 //	value.Number().InRange(100, 200)
 func (v *Value) Number() *Number {
-	v.chain.enter("Number()")
-	defer v.chain.leave()
+	opChain := v.chain.enter("Number()")
+	defer opChain.leave()
 
-	if v.chain.failed() {
-		return newNumber(v.chain, 0)
+	if opChain.failed() {
+		return newNumber(opChain, 0)
 	}
 
 	data, ok := v.value.(float64)
 
 	if !ok {
-		v.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertValid,
 			Actual: &AssertionValue{v.value},
 			Errors: []error{
 				errors.New("expected: value is number"),
 			},
 		})
-		return newNumber(v.chain, 0)
+		return newNumber(opChain, 0)
 	}
 
-	return newNumber(v.chain, data)
+	return newNumber(opChain, data)
 }
 
 // Boolean returns a new Boolean attached to underlying value.
@@ -309,32 +358,32 @@ func (v *Value) Number() *Number {
 // Example:
 //
 //	value := NewValue(t, true)
-//	value.Boolean().True()
+//	value.Boolean().IsTrue()
 func (v *Value) Boolean() *Boolean {
-	v.chain.enter("Boolean()")
-	defer v.chain.leave()
+	opChain := v.chain.enter("Boolean()")
+	defer opChain.leave()
 
-	if v.chain.failed() {
-		return newBoolean(v.chain, false)
+	if opChain.failed() {
+		return newBoolean(opChain, false)
 	}
 
 	data, ok := v.value.(bool)
 
 	if !ok {
-		v.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertValid,
 			Actual: &AssertionValue{v.value},
 			Errors: []error{
 				errors.New("expected: value is boolean"),
 			},
 		})
-		return newBoolean(v.chain, false)
+		return newBoolean(opChain, false)
 	}
 
-	return newBoolean(v.chain, data)
+	return newBoolean(opChain, data)
 }
 
-// Null succeeds if value is nil.
+// IsNull succeeds if value is nil.
 //
 // Note that non-nil interface{} that points to nil value (e.g. nil slice or map)
 // is also treated as null value. Empty (non-nil) slice or map, empty string, and
@@ -343,20 +392,20 @@ func (v *Value) Boolean() *Boolean {
 // Example:
 //
 //	value := NewValue(t, nil)
-//	value.Null()
+//	value.IsNull()
 //
 //	value := NewValue(t, []interface{}(nil))
-//	value.Null()
-func (v *Value) Null() *Value {
-	v.chain.enter("Null()")
-	defer v.chain.leave()
+//	value.IsNull()
+func (v *Value) IsNull() *Value {
+	opChain := v.chain.enter("IsNull()")
+	defer opChain.leave()
 
-	if v.chain.failed() {
+	if opChain.failed() {
 		return v
 	}
 
 	if !(v.value == nil) {
-		v.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:   AssertNil,
 			Actual: &AssertionValue{v.value},
 			Errors: []error{
@@ -379,18 +428,18 @@ func (v *Value) Null() *Value {
 //	value := NewValue(t, "")
 //	value.NotNull()
 //
-//	value := NewValue(t, make([]interface{}, 0)
-//	value.Null()
+//	value := NewValue(t, make([]interface{}, 0))
+//	value.NotNull()
 func (v *Value) NotNull() *Value {
-	v.chain.enter("NotNull()")
-	defer v.chain.leave()
+	opChain := v.chain.enter("NotNull()")
+	defer opChain.leave()
 
-	if v.chain.failed() {
+	if opChain.failed() {
 		return v
 	}
 
-	if !(v.value != nil) {
-		v.chain.fail(AssertionFailure{
+	if v.value == nil {
+		opChain.fail(AssertionFailure{
 			Type:   AssertNotNil,
 			Actual: &AssertionValue{v.value},
 			Errors: []error{
@@ -402,28 +451,325 @@ func (v *Value) NotNull() *Value {
 	return v
 }
 
-// Equal succeeds if value is equal to another value (e.g. map, slice, string, etc).
+// Deprecated: use IsNull instead.
+func (v *Value) Null() *Value {
+	return v.IsNull()
+}
+
+// IsObject succeeds if the underlying value is an object.
+//
+// If underlying value is not an object (map[string]interface{}), failure is reported.
+//
+// Example:
+//
+//	value := NewValue(t, map[string]interface{}{"foo": 123})
+//	value.IsObject()
+func (v *Value) IsObject() *Value {
+	opChain := v.chain.enter("IsObject()")
+	defer opChain.leave()
+
+	if opChain.failed() {
+		return v
+	}
+
+	if _, ok := v.value.(map[string]interface{}); !ok {
+		opChain.fail(AssertionFailure{
+			Type:   AssertValid,
+			Actual: &AssertionValue{v.value},
+			Errors: []error{
+				errors.New("expected: value is object"),
+			},
+		})
+	}
+
+	return v
+}
+
+// NotObject succeeds if the underlying value is not an object.
+//
+// If underlying value is an object (map[string]interface{}), failure is reported.
+//
+// Example:
+//
+//	value := NewValue(t, nil)
+//	value.NotObject()
+func (v *Value) NotObject() *Value {
+	opChain := v.chain.enter("NotObject()")
+	defer opChain.leave()
+
+	if opChain.failed() {
+		return v
+	}
+
+	if _, ok := v.value.(map[string]interface{}); ok {
+		opChain.fail(AssertionFailure{
+			Type:   AssertValid,
+			Actual: &AssertionValue{v.value},
+			Errors: []error{
+				errors.New("expected: value is not object"),
+			},
+		})
+	}
+
+	return v
+}
+
+// IsArray succeeds if the underlying value is an array.
+//
+// If underlying value is not an array ([]interface{}), failure is reported.
+//
+// Example:
+//
+//	value := NewValue(t, []interface{}{"foo", "123"})
+//	value.IsArray()
+func (v *Value) IsArray() *Value {
+	opChain := v.chain.enter("IsArray()")
+	defer opChain.leave()
+
+	if opChain.failed() {
+		return v
+	}
+
+	if _, ok := v.value.([]interface{}); !ok {
+		opChain.fail(AssertionFailure{
+			Type:   AssertValid,
+			Actual: &AssertionValue{v.value},
+			Errors: []error{
+				errors.New("expected: value is array"),
+			},
+		})
+	}
+
+	return v
+}
+
+// NotArray succeeds if the underlying value is not an array.
+//
+// If underlying value is an array ([]interface{}), failure is reported.
+//
+// Example:
+//
+//	value := NewValue(t, nil)
+//	value.NotArray()
+func (v *Value) NotArray() *Value {
+	opChain := v.chain.enter("NotArray()")
+	defer opChain.leave()
+
+	if opChain.failed() {
+		return v
+	}
+
+	if _, ok := v.value.([]interface{}); ok {
+		opChain.fail(AssertionFailure{
+			Type:   AssertValid,
+			Actual: &AssertionValue{v.value},
+			Errors: []error{
+				errors.New("expected: value is not array"),
+			},
+		})
+	}
+
+	return v
+}
+
+// IsString succeeds if the underlying value is a string.
+//
+// If underlying value is not a string, failure is reported.
+//
+// Example:
+//
+//	value := NewValue(t, "foo")
+//	value.IsString()
+func (v *Value) IsString() *Value {
+	opChain := v.chain.enter("IsString()")
+	defer opChain.leave()
+
+	if opChain.failed() {
+		return v
+	}
+
+	if _, ok := v.value.(string); !ok {
+		opChain.fail(AssertionFailure{
+			Type:   AssertValid,
+			Actual: &AssertionValue{v.value},
+			Errors: []error{
+				errors.New("expected: value is string"),
+			},
+		})
+	}
+
+	return v
+}
+
+// NotString succeeds if the underlying value is not a string.
+//
+// If underlying value is a string, failure is reported.
+//
+// Example:
+//
+//	value := NewValue(t, nil)
+//	value.NotString()
+func (v *Value) NotString() *Value {
+	opChain := v.chain.enter("NotString()")
+	defer opChain.leave()
+
+	if opChain.failed() {
+		return v
+	}
+
+	if _, ok := v.value.(string); ok {
+		opChain.fail(AssertionFailure{
+			Type:   AssertValid,
+			Actual: &AssertionValue{v.value},
+			Errors: []error{
+				errors.New("expected: value is not string"),
+			},
+		})
+	}
+
+	return v
+}
+
+// IsNumber succeeds if the underlying value is a number.
+//
+// If underlying value is not a number (numeric type convertible to float64),
+// failure is reported
+//
+// Example:
+//
+//	value := NewValue(t, 123)
+//	value.IsNumber()
+func (v *Value) IsNumber() *Value {
+	opChain := v.chain.enter("IsNumber()")
+	defer opChain.leave()
+
+	if opChain.failed() {
+		return v
+	}
+
+	if _, ok := v.value.(float64); !ok {
+		opChain.fail(AssertionFailure{
+			Type:   AssertValid,
+			Actual: &AssertionValue{v.value},
+			Errors: []error{
+				errors.New("expected: value is number"),
+			},
+		})
+	}
+
+	return v
+}
+
+// NotNumber succeeds if the underlying value is a not a number.
+//
+// If underlying value is a number (numeric type convertible to float64),
+// failure is reported
+//
+// Example:
+//
+//	value := NewValue(t, nil)
+//	value.NotNumber()
+func (v *Value) NotNumber() *Value {
+	opChain := v.chain.enter("NotNumber()")
+	defer opChain.leave()
+
+	if opChain.failed() {
+		return v
+	}
+
+	if _, ok := v.value.(float64); ok {
+		opChain.fail(AssertionFailure{
+			Type:   AssertValid,
+			Actual: &AssertionValue{v.value},
+			Errors: []error{
+				errors.New("expected: value is not number"),
+			},
+		})
+	}
+
+	return v
+}
+
+// IsBoolean succeeds if the underlying value is a boolean.
+//
+// If underlying value is not a boolean, failure is reported.
+//
+// Example:
+//
+//	value := NewValue(t, true)
+//	value.IsBoolean()
+func (v *Value) IsBoolean() *Value {
+	opChain := v.chain.enter("IsBoolean()")
+	defer opChain.leave()
+
+	if opChain.failed() {
+		return v
+	}
+
+	if _, ok := v.value.(bool); !ok {
+		opChain.fail(AssertionFailure{
+			Type:   AssertValid,
+			Actual: &AssertionValue{v.value},
+			Errors: []error{
+				errors.New("expected: value is boolean"),
+			},
+		})
+	}
+
+	return v
+}
+
+// NotBoolean succeeds if the underlying value is not a boolean.
+//
+// If underlying value is a boolean, failure is reported.
+//
+// Example:
+//
+//	value := NewValue(t, nil)
+//	value.NotBoolean()
+func (v *Value) NotBoolean() *Value {
+	opChain := v.chain.enter("NotBoolean()")
+	defer opChain.leave()
+
+	if opChain.failed() {
+		return v
+	}
+
+	if _, ok := v.value.(bool); ok {
+		opChain.fail(AssertionFailure{
+			Type:   AssertValid,
+			Actual: &AssertionValue{v.value},
+			Errors: []error{
+				errors.New("expected: value is not boolean"),
+			},
+		})
+	}
+
+	return v
+}
+
+// IsEqual succeeds if value is equal to another value (e.g. map, slice, string, etc).
 // Before comparison, both values are converted to canonical form.
 //
 // Example:
 //
 //	value := NewValue(t, "foo")
-//	value.Equal("foo")
-func (v *Value) Equal(value interface{}) *Value {
-	v.chain.enter("Equal()")
-	defer v.chain.leave()
+//	value.IsEqual("foo")
+func (v *Value) IsEqual(value interface{}) *Value {
+	opChain := v.chain.enter("IsEqual()")
+	defer opChain.leave()
 
-	if v.chain.failed() {
+	if opChain.failed() {
 		return v
 	}
 
-	expected, ok := canonValue(v.chain, value)
+	expected, ok := canonValue(opChain, value)
 	if !ok {
 		return v
 	}
 
 	if !reflect.DeepEqual(expected, v.value) {
-		v.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:     AssertEqual,
 			Actual:   &AssertionValue{v.value},
 			Expected: &AssertionValue{expected},
@@ -444,20 +790,20 @@ func (v *Value) Equal(value interface{}) *Value {
 //	value := NewValue(t, "foo")
 //	value.NorEqual("bar")
 func (v *Value) NotEqual(value interface{}) *Value {
-	v.chain.enter("NotEqual()")
-	defer v.chain.leave()
+	opChain := v.chain.enter("NotEqual()")
+	defer opChain.leave()
 
-	if v.chain.failed() {
+	if opChain.failed() {
 		return v
 	}
 
-	expected, ok := canonValue(v.chain, value)
+	expected, ok := canonValue(opChain, value)
 	if !ok {
 		return v
 	}
 
 	if reflect.DeepEqual(expected, v.value) {
-		v.chain.fail(AssertionFailure{
+		opChain.fail(AssertionFailure{
 			Type:     AssertNotEqual,
 			Actual:   &AssertionValue{v.value},
 			Expected: &AssertionValue{expected},
@@ -465,6 +811,116 @@ func (v *Value) NotEqual(value interface{}) *Value {
 				errors.New("expected: values are non-equal"),
 			},
 		})
+	}
+
+	return v
+}
+
+// Deprecated: use IsEqual instead.
+func (v *Value) Equal(value interface{}) *Value {
+	return v.IsEqual(value)
+}
+
+// InList succeeds if whole value is equal to one of the values from given
+// list of values (e.g. map, slice, string, etc). Before comparison, all
+// values are converted to canonical form.
+//
+// If at least one value has wrong type, failure is reported.
+//
+// Example:
+//
+//	value := NewValue(t, "foo")
+//	value.InList("foo", 123)
+func (v *Value) InList(values ...interface{}) *Value {
+	opChain := v.chain.enter("InList()")
+	defer opChain.leave()
+
+	if opChain.failed() {
+		return v
+	}
+
+	if len(values) == 0 {
+		opChain.fail(AssertionFailure{
+			Type: AssertUsage,
+			Errors: []error{
+				errors.New("unexpected empty list argument"),
+			},
+		})
+		return v
+	}
+
+	var isListed bool
+	for _, val := range values {
+		expected, ok := canonValue(opChain, val)
+		if !ok {
+			return v
+		}
+
+		if reflect.DeepEqual(expected, v.value) {
+			isListed = true
+			// continue loop to check that all values are correct
+		}
+	}
+
+	if !isListed {
+		opChain.fail(AssertionFailure{
+			Type:     AssertBelongs,
+			Actual:   &AssertionValue{v.value},
+			Expected: &AssertionValue{AssertionList(values)},
+			Errors: []error{
+				errors.New("expected: value is equal to one of the values"),
+			},
+		})
+	}
+
+	return v
+}
+
+// NotInList succeeds if the whole value is not equal to any of the values from
+// given list of values (e.g. map, slice, string, etc).
+// Before comparison, all values are converted to canonical form.
+//
+// If at least one value has wrong type, failure is reported.
+//
+// Example:
+//
+//	value := NewValue(t, "foo")
+//	value.NotInList("bar", 123)
+func (v *Value) NotInList(values ...interface{}) *Value {
+	opChain := v.chain.enter("NotInList()")
+	defer opChain.leave()
+
+	if opChain.failed() {
+		return v
+	}
+
+	if len(values) == 0 {
+		opChain.fail(AssertionFailure{
+			Type: AssertUsage,
+			Errors: []error{
+				errors.New("unexpected empty list argument"),
+			},
+		})
+		return v
+	}
+
+	for _, val := range values {
+		expected, ok := canonValue(opChain, val)
+		if !ok {
+			return v
+		}
+
+		if reflect.DeepEqual(expected, v.value) {
+			opChain.fail(AssertionFailure{
+				Type:     AssertNotBelongs,
+				Actual:   &AssertionValue{v.value},
+				Expected: &AssertionValue{AssertionList(values)},
+				Errors: []error{
+					errors.New("expected: value is not equal to any of the values"),
+				},
+			})
+			return v
+		}
 	}
 
 	return v

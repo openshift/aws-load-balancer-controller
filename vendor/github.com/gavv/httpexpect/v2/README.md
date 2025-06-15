@@ -1,6 +1,6 @@
 ![](_images/logo.png)
 
-# httpexpect [![GoDev](https://img.shields.io/badge/go.dev-reference-007d9c?logo=go&logoColor=white)](https://pkg.go.dev/github.com/gavv/httpexpect/v2) [![Build](https://github.com/gavv/httpexpect/workflows/build/badge.svg)](https://github.com/gavv/httpexpect/actions) [![Coveralls](https://coveralls.io/repos/github/gavv/httpexpect/badge.svg?branch=master)](https://coveralls.io/github/gavv/httpexpect?branch=master) [![GitHub release](https://img.shields.io/github/tag/gavv/httpexpect.svg)](https://github.com/gavv/httpexpect/tags) [![Discord](https://img.shields.io/discord/1047473005900615780?logo=discord&label=discord&color=blueviolet&logoColor=white)](https://discord.gg/5SCPCuCWA9)
+# httpexpect [![GoDev](https://img.shields.io/badge/go.dev-reference-007d9c?logo=go&logoColor=white)](https://pkg.go.dev/github.com/gavv/httpexpect/v2) [![Build](https://github.com/gavv/httpexpect/workflows/build/badge.svg)](https://github.com/gavv/httpexpect/actions) [![Coveralls](https://coveralls.io/repos/github/gavv/httpexpect/badge.svg?branch=master)](https://coveralls.io/github/gavv/httpexpect?branch=master) [![GitHub release](https://img.shields.io/github/tag/gavv/httpexpect.svg)](https://github.com/gavv/httpexpect/releases) [![Discord](https://img.shields.io/discord/1047473005900615780?logo=discord&label=discord&color=blueviolet&logoColor=white)](https://discord.gg/5SCPCuCWA9)
 
 Concise, declarative, and easy to use end-to-end HTTP and REST API testing for Go (golang).
 
@@ -18,7 +18,7 @@ Workflow:
 
 * URL path construction, with simple string interpolation provided by [`go-interpol`](https://github.com/imkira/go-interpol) package.
 * URL query parameters (encoding using [`go-querystring`](https://github.com/google/go-querystring) package).
-* Headers, cookies, payload: JSON,  urlencoded or multipart forms (encoding using [`form`](https://github.com/ajg/form) package), plain text.
+* Headers, cookies, payload: JSON, urlencoded or multipart forms (encoding using [`form`](https://github.com/ajg/form) package), plain text.
 * Custom reusable [request builders](#reusable-builders) and [request transformers](#request-transformers).
 
 ##### Response assertions
@@ -30,7 +30,7 @@ Workflow:
 
 ##### Payload assertions
 
-* Type-specific assertions, supported types: object, array, string, number, boolean, null, datetime.
+* Type-specific assertions, supported types: object, array, string, number, boolean, null, datetime, duration, cookie.
 * Regular expressions.
 * Simple JSON queries (using subset of [JSONPath](http://goessner.net/articles/JsonPath/)), provided by [`jsonpath`](https://github.com/yalp/jsonpath) package.
 * [JSON Schema](http://json-schema.org/) validation, provided by [`gojsonschema`](https://github.com/xeipuuv/gojsonschema) package.
@@ -48,30 +48,27 @@ Workflow:
 * Failures are reported using [`testify`](https://github.com/stretchr/testify/) (`assert` or `require` package) or standard `testing` package.
 * JSON values are pretty-printed using `encoding/json`, Go values are pretty-printed using [`litter`](https://github.com/sanity-io/litter).
 * Dumping requests and responses in various formats, using [`httputil`](https://golang.org/pkg/net/http/httputil/), [`http2curl`](https://github.com/moul/http2curl), or simple compact logger.
+* Printing stacktrace on failure in verbose or compact format.
+* Color support using [`fatih/color`](https://github.com/fatih/color).
 
 ##### Tuning
 
 * Tests can communicate with server via real HTTP client or invoke `net/http` or [`fasthttp`](https://github.com/valyala/fasthttp/) handler directly.
 * User can provide custom HTTP client, WebSocket dialer, HTTP request factory (e.g. from the Google App Engine testing).
-* User can configure formatting options or provide custom templates based on `text/template` engine.
+* User can configure redirect and retry policies and timeouts.
+* User can configure formatting options (what parts to display, how to format numbers, etc.) or provide custom templates based on `text/template` engine.
 * Custom handlers may be provided for logging, printing requests and responses, handling succeeded and failed assertions.
 
-## Versions
+## Versioning
 
 The versions are selected according to the [semantic versioning](https://semver.org/) scheme. Every new major version gets its own stable branch with a backwards compatibility promise. Releases are tagged from stable branches.
 
-The current stable branch is `v2`. Previous branches are still maintained, but no new features are added.
+Changelog file can be found here: [changelog](CHANGES.md).
 
-If you're using go.mod, use a versioned import path:
+The current stable branch is `v2`:
 
 ```go
 import "github.com/gavv/httpexpect/v2"
-```
-
-Otherwise, use gopkg.in import path:
-
-```go
-import "gopkg.in/gavv/httpexpect.v2"
 ```
 
 ## Documentation
@@ -83,6 +80,23 @@ Documentation is available on [pkg.go.dev](https://pkg.go.dev/github.com/gavv/ht
 Community forum and Q&A board is right on GitHub in [discussions tab](https://github.com/gavv/httpexpect/discussions).
 
 For more interactive discussion, you can join [discord chat](https://discord.gg/5SCPCuCWA9).
+
+## Contributing
+
+Feel free to report bugs, suggest improvements, and send pull requests! Please add documentation and tests for new features.
+
+This project highly depends on contributors. Thank you all for your amazing work!
+
+If you would like to submit code, see [HACKING.md](HACKING.md).
+
+## Donating
+
+If you would like to support my open-source work, you can do it here:
+
+* [Liberapay](https://liberapay.com/gavv)
+* [PayPal](https://www.paypal.com/paypalme/victorgaydov)
+
+Thanks!
 
 ## Examples
 
@@ -112,9 +126,21 @@ See [`_examples`](_examples) directory for complete standalone examples.
 
     Testing a WebSocket server based on [`gorilla/websocket`](https://github.com/gorilla/websocket). Tests invoke the `http.Handler` or `fasthttp.RequestHandler` directly.
 
+* [`tls_test.go`](_examples/tls_test.go)
+
+  Testing a TLS server made with `net/http` and `crypto/tls`
+
+* [`oauth2_test.go`](_examples/oauth2_test.go)
+
+  Testing a OAuth2 server with [`oauth2`](https://github.com/go-oauth2/oauth2/).
+
 * [`gae_test.go`](_examples/gae_test.go)
 
     Testing a server running under the [Google App Engine](https://en.wikipedia.org/wiki/Google_App_Engine).
+
+* [`formatter_test.go`](_examples/formatter_test.go)
+
+    Testing with custom formatter for assertion messages.
 
 ## Quick start
 
@@ -145,7 +171,7 @@ func TestFruits(t *testing.T) {
 	// is it working?
 	e.GET("/fruits").
 		Expect().
-		Status(http.StatusOK).JSON().Array().Empty()
+		Status(http.StatusOK).JSON().Array().IsEmpty()
 }
 ```
 
@@ -163,7 +189,7 @@ e.PUT("/fruits/orange").WithJSON(orange).
 e.GET("/fruits/orange").
 	Expect().
 	Status(http.StatusOK).
-	JSON().Object().ContainsKey("weight").ValueEqual("weight", 100)
+	JSON().Object().ContainsKey("weight").HasValue("weight", 100)
 
 apple := map[string]interface{}{
 	"colors": []interface{}{"green", "red"},
@@ -180,11 +206,11 @@ obj := e.GET("/fruits/apple").
 
 obj.Keys().ContainsOnly("colors", "weight")
 
-obj.Value("colors").Array().Elements("green", "red")
-obj.Value("colors").Array().Element(0).String().Equal("green")
-obj.Value("colors").Array().Element(1).String().Equal("red")
-obj.Value("colors").Array().First().String().Equal("green")
-obj.Value("colors").Array().Last().String().Equal("red")
+obj.Value("colors").Array().ConsistsOf("green", "red")
+obj.Value("colors").Array().Value(0).String().IsEqual("green")
+obj.Value("colors").Array().Value(1).String().IsEqual("red")
+obj.Value("colors").Array().First().String().IsEqual("green")
+obj.Value("colors").Array().Last().String().IsEqual("red")
 ```
 
 ##### JSON Schema and JSON Path
@@ -212,7 +238,28 @@ repos.Schema(schema)
 
 // run JSONPath query and iterate results
 for _, private := range repos.Path("$..private").Array().Iter() {
-	private.Boolean().False()
+	private.Boolean().IsFalse()
+}
+```
+
+##### JSON decoding
+
+```go
+type User struct {
+	Name   string `json:"name"`
+	Age    int    `json:"age"`
+	Gender string `json:"gender"`
+}
+
+var user User
+e.GET("/user").
+	Expect().
+	Status(http.StatusOK).
+	JSON().
+	Decode(&user)
+	
+if user.Name != "octocat" {
+	t.Fail()
 }
 ```
 
@@ -292,9 +339,9 @@ c := e.GET("/users/john").
 	Expect().
 	Status(http.StatusOK).Cookie("session")
 
-c.Value().Equal(sessionID)
-c.Domain().Equal("example.com")
-c.Path().Equal("/")
+c.Value().IsEqual(sessionID)
+c.Domain().IsEqual("example.com")
+c.Path().IsEqual("/")
 c.Expires().InRange(t, t.Add(time.Hour * 24))
 ```
 
@@ -312,12 +359,12 @@ m := e.GET("/users/john").
 	Expect().
 	Header("Location").Match("http://(?P<host>.+)/users/(?P<user>.+)")
 
-m.Index(0).Equal("http://example.com/users/john")
-m.Index(1).Equal("example.com")
-m.Index(2).Equal("john")
+m.Submatch(0).IsEqual("http://example.com/users/john")
+m.Submatch(1).IsEqual("example.com")
+m.Submatch(2).IsEqual("john")
 
-m.Name("host").Equal("example.com")
-m.Name("user").Equal("john")
+m.NamedSubmatch("host").IsEqual("example.com")
+m.NamedSubmatch("user").IsEqual("john")
 ```
 
 ##### Redirection support
@@ -344,7 +391,7 @@ e.POST("/path").
 	Expect().
 	Status(http.StatusOK)
 
-// custom retry policy
+// custom built-in retry policy
 e.POST("/path").
 	WithMaxRetries(5).
 	WithRetryPolicy(httpexpect.RetryAllErrors).
@@ -355,6 +402,15 @@ e.POST("/path").
 e.POST("/path").
 	WithMaxRetries(5).
 	WithRetryDelay(time.Second, time.Minute).
+	Expect().
+	Status(http.StatusOK)
+
+// custom user-defined retry policy
+e.POST("/path").
+	WithMaxRetries(5).
+	WithRetryPolicyFunc(func(resp *http.Response, err error) bool {
+		return resp.StatusCode == http.StatusTeapot
+	}).
 	Expect().
 	Status(http.StatusOK)
 ```
@@ -382,7 +438,7 @@ defer ws.Disconnect()
 
 ws.WriteText("some request").
 	Expect().
-	TextMessage().Body().Equal("some response")
+	TextMessage().Body().IsEqual("some response")
 
 ws.CloseWithText("bye").
 	Expect().
@@ -646,7 +702,7 @@ e := httpexpect.WithConfig(httpexpect.Config{
 })
 ```
 
-##### Global time-out/cancellation
+##### Global timeout/cancellation
 
 ```go
 handler := FruitsHandler()
@@ -672,7 +728,7 @@ e.GET("/fruits").
 	Status(http.StatusOK)
 ```
 
-##### Per-request time-out/cancellation
+##### Per-request timeout/cancellation
 
 ```go
 // per-request context
@@ -693,6 +749,67 @@ e.POST("/fruits").
 	WithTimeout(time.Duration(10)*time.Second).
 	Expect().
 	Status(http.StatusOK)
+```
+
+##### Choosing failure reporter
+
+```go
+// default reporter, uses testify/assert
+// failures don't terminate test immediately, but mark test as failed
+e := httpexpect.WithConfig(httpexpect.Config{
+	Reporter: httpexpect.NewAssertReporter(t),
+})
+
+// uses testify/require
+// failures terminate test immediately
+e := httpexpect.WithConfig(httpexpect.Config{
+	Reporter: httpexpect.NewRequireReporter(t),
+})
+
+// if you're using bare testing.T without testify
+e := httpexpect.WithConfig(httpexpect.Config{
+	Reporter: t,
+})
+
+// if you're using bare testing.T and want failures to terminate test immediately
+e := httpexpect.WithConfig(httpexpect.Config{
+	Reporter: httpexpect.NewFatalReporter(t),
+})
+
+// if you want fatal failures triggered from other goroutines
+e := httpexpect.WithConfig(httpexpect.Config{
+	Reporter: httpexpect.NewPanicReporter(t),
+})
+```
+
+##### Assigning names to requests
+
+```go
+// when the tests fails, assertion message will mention request name:
+//   request name: Get Fruits
+e.GET("/fruits").
+    WithName("Get Fruits")
+	Expect().
+	Status(http.StatusOK).JSON().Array().IsEmpty()
+```
+
+##### Assigning aliases to values
+
+```go
+// when the tests fails, assertion path in the failure message is:
+//   assertion: Request("GET").Expect().JSON().Array().IsEmpty()
+e.GET("/fruits").
+	Expect().
+	Status(http.StatusOK).JSON().Array().IsEmpty()
+
+// assign alias "fruits" to the Array variable
+fruits := e.GET("/fruits").
+	Expect().
+	Status(http.StatusOK).JSON().Array().Alias("fruits")
+
+// assertion path in the failure message is now:
+//   assertion: fruits.IsEmpty()
+fruits.IsEmpty()
 ```
 
 ##### Printing requests and responses
@@ -727,16 +844,19 @@ e := httpexpect.WithConfig(httpexpect.Config{
 ##### Customize failure formatting
 
 ```go
-// customize formatting options
+// change formatting options
 e := httpexpect.WithConfig(httpexpect.Config{
 	Reporter:  httpexpect.NewAssertReporter(t),
 	Formatter: &httpexpect.DefaultFormatter{
 		DisablePaths: true,
 		DisableDiffs: true,
+		FloatFormat:  httpexpect.FloatFormatScientific,
+		ColorMode:    httpexpect.ColorModeNever,
+		LineWidth:    80,
 	},
 })
 
-// customize formatting template
+// provide custom templates
 e := httpexpect.WithConfig(httpexpect.Config{
 	Reporter:  httpexpect.NewAssertReporter(t),
 	Formatter: &httpexpect.DefaultFormatter{
@@ -774,66 +894,30 @@ e := httpexpect.WithConfig(httpexpect.Config{
 })
 ```
 
+## Environment variables
+
+The following environment variables are checked when `ColorModeAuto` is used:
+
+* `FORCE_COLOR` - if set to a positive integers, colors are enabled
+* `NO_COLOR` - if set to non-empty string, colors are disabled ([see also](https://no-color.org/))
+* `TERM` - if starts with `dumb`, colors are disabled
+
 ## Similar packages
 
 * [`gorequest`](https://github.com/parnurzeal/gorequest)
-* [`baloo`](https://github.com/h2non/baloo)
 * [`apitest`](https://github.com/steinfletcher/apitest)
+* [`baloo`](https://github.com/h2non/baloo)
 * [`gofight`](https://github.com/appleboy/gofight)
+* [`go-hit`](https://github.com/Eun/go-hit)
 * [`frisby`](https://github.com/verdverm/frisby)
 * [`forest`](https://github.com/emicklei/forest)
 * [`restit`](https://github.com/go-restit/restit)
-* [`httptesting`](https://github.com/dolab/httptesting)
-* [`http-test`](https://github.com/vsco/http-test)
-* [`go-json-rest`](https://github.com/ant0ine/go-json-rest)
 
-## Contributing
+## Authors
 
-Feel free to report bugs, suggest improvements, and send pull requests! Please add documentation and tests for new features.
+List of contributors can be [found here](AUTHORS.md).
 
-Install developer dependencies:
-
-* [golangci-lint](https://golangci-lint.run/usage/install/#local-installation)
-
-* [stringer](https://github.com/golang/tools)
-
-    `go install golang.org/x/tools/cmd/stringer@latest`
-
-Re-generate, build, lint, and test everything:
-
-```
-make
-```
-
-Run tests:
-
-```
-make test
-```
-
-Run only short tests:
-
-```
-make short
-```
-
-Run gofmt:
-
-```
-make fmt
-```
-
-Run go generate:
-
-```
-make gen
-```
-
-Run go mod tidy:
-
-```
-make tidy
-```
+If your name is missing or you want to change its appearance, feel free to submit PR!
 
 ## License
 
