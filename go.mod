@@ -4,7 +4,7 @@ go 1.22.3
 
 require (
 	github.com/aws/aws-sdk-go v1.50.8
-	github.com/evanphx/json-patch v5.7.0+incompatible
+	github.com/evanphx/json-patch v5.9.11+incompatible
 	github.com/gavv/httpexpect/v2 v2.9.0
 	github.com/go-logr/logr v1.4.1
 	github.com/golang/mock v1.6.0
