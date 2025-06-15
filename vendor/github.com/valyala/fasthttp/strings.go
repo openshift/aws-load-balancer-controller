@@ -1,8 +1,8 @@
 package fasthttp
 
 var (
-	defaultServerName  = []byte("fasthttp")
-	defaultUserAgent   = []byte("fasthttp")
+	defaultServerName  = "fasthttp"
+	defaultUserAgent   = "fasthttp"
 	defaultContentType = []byte("text/plain; charset=utf-8")
 )
 
@@ -19,15 +19,16 @@ var (
 	strCRLF                     = []byte("\r\n")
 	strHTTP                     = []byte("http")
 	strHTTPS                    = []byte("https")
-	strHTTP10                   = []byte("HTTP/1.0")
 	strHTTP11                   = []byte("HTTP/1.1")
 	strColon                    = []byte(":")
 	strColonSlashSlash          = []byte("://")
 	strColonSpace               = []byte(": ")
 	strCommaSpace               = []byte(", ")
 	strGMT                      = []byte("GMT")
+	strSpace                    = []byte(" ")
 
 	strResponseContinue = []byte("HTTP/1.1 100 Continue\r\n\r\n")
+	strEarlyHints       = []byte("HTTP/1.1 103 Early Hints\r\n")
 
 	strExpect             = []byte(HeaderExpect)
 	strConnection         = []byte(HeaderConnection)
@@ -57,12 +58,14 @@ var (
 	strProxyAuthenticate  = []byte(HeaderProxyAuthenticate)
 	strProxyAuthorization = []byte(HeaderProxyAuthorization)
 	strWWWAuthenticate    = []byte(HeaderWWWAuthenticate)
+	strVary               = []byte(HeaderVary)
 
 	strCookieExpires        = []byte("expires")
 	strCookieDomain         = []byte("domain")
 	strCookiePath           = []byte("path")
 	strCookieHTTPOnly       = []byte("HttpOnly")
 	strCookieSecure         = []byte("secure")
+	strCookiePartitioned    = []byte("Partitioned")
 	strCookieMaxAge         = []byte("max-age")
 	strCookieSameSite       = []byte("SameSite")
 	strCookieSameSiteLax    = []byte("Lax")
@@ -72,6 +75,7 @@ var (
 	strClose               = []byte("close")
 	strGzip                = []byte("gzip")
 	strBr                  = []byte("br")
+	strZstd                = []byte("zstd")
 	strDeflate             = []byte("deflate")
 	strKeepAlive           = []byte("keep-alive")
 	strUpgrade             = []byte("Upgrade")
@@ -84,6 +88,7 @@ var (
 	strBoundary            = []byte("boundary")
 	strBytes               = []byte("bytes")
 	strBasicSpace          = []byte("Basic ")
+	strLink                = []byte("Link")
 
 	strApplicationSlash = []byte("application/")
 	strImageSVG         = []byte("image/svg")
