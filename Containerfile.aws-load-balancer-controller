@@ -1,0 +1,31 @@
+# Detect the drift from the upstream Dockerfile
+FROM registry.access.redhat.com/ubi8/ubi-minimal:latest AS drift
+WORKDIR /app
+COPY drift-cache/Dockerfile.openshift Dockerfile.openshift.cached
+COPY Dockerfile.openshift .
+# If the command below fails it means that the Dockerfile.openshift from this repository changed.
+# You have to update the Konflux Containerfile accordingly (Containerfile.aws-load-balancer-controller).
+# drift-cache/Dockerfile.openshift.cached can be updated with the source contents once the Konflux version is aligned.
+RUN [ "$(sha1sum Dockerfile.openshift.cached | cut -d' ' -f1)" = "$(sha1sum Dockerfile.openshift | cut -d' ' -f1)" ]
+
+FROM registry.access.redhat.com/ubi8/go-toolset:1.22 as builder
+# dummy copy to trigger the drift detection
+COPY --from=drift /app/Dockerfile.openshift.cached .
+
+COPY . /workspace
+WORKDIR /workspace
+
+# Build
+RUN go build -tags strictfipsruntime -o /usr/bin/controller -mod=vendor main.go
+
+FROM registry.redhat.io/rhel8-6-els/rhel:8.6-1737
+LABEL maintainer="Red Hat, Inc."
+LABEL com.redhat.component="aws-load-balancer-controller-container"
+LABEL name="aws-load-balancer-controller"
+LABEL version="1.2.0"
+LABEL commit="d58fdf6a6b049d6dd779435364f6fb238d1aa755"
+
+WORKDIR /
+COPY --from=builder /usr/bin/controller /
+
+ENTRYPOINT ["/controller"]
