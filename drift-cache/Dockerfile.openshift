@@ -1,0 +1,22 @@
+FROM registry.ci.openshift.org/ocp/builder:rhel-8-golang-1.22-openshift-4.17 AS builder
+
+WORKDIR /opt/app-root/src
+
+# Copy the dependencies which don't change frequently
+COPY go.mod go.mod
+COPY go.sum go.sum
+COPY vendor vendor
+
+# Copy the source files
+COPY apis apis
+COPY main.go main.go
+COPY controllers controllers
+COPY pkg pkg
+COPY webhooks webhooks
+
+# Build the controller
+RUN go build -tags strictfipsruntime -mod=vendor -o controller main.go
+
+FROM registry.redhat.io/rhel8-6-els/rhel:latest
+COPY --from=builder /opt/app-root/src/controller /usr/bin/controller
+ENTRYPOINT ["/usr/bin/controller"]
