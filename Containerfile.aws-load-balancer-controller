@@ -12,11 +12,18 @@ FROM registry.access.redhat.com/ubi8/go-toolset:1.22 as builder
 # dummy copy to trigger the drift detection
 COPY --from=drift /app/Dockerfile.openshift.cached .
 
-COPY . /workspace
 WORKDIR /workspace
+# Dummy RUN to create /workspace directory.
+# WORKDIR doesn't create the directory (at least for Podman).
+# Without this step, the following COPY may create /workspace
+# as root-owned (instead of go-toolset's default 1001)
+# leading to  "Permission denied" errors during "go build"
+# when trying to write output.
+RUN ls .
+COPY . .
 
 # Build
-RUN go build -tags strictfipsruntime -o /usr/bin/controller -mod=vendor main.go
+RUN go build -tags strictfipsruntime -o controller -mod=vendor main.go
 
 FROM registry.redhat.io/rhel8-6-els/rhel:8.6-1737
 LABEL maintainer="Red Hat, Inc."
@@ -26,6 +33,6 @@ LABEL version="1.2.0"
 LABEL commit="d58fdf6a6b049d6dd779435364f6fb238d1aa755"
 
 WORKDIR /
-COPY --from=builder /usr/bin/controller /
+COPY --from=builder /workspace/controller /
 
 ENTRYPOINT ["/controller"]
