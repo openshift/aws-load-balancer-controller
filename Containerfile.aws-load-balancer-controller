@@ -34,5 +34,6 @@ LABEL commit="d58fdf6a6b049d6dd779435364f6fb238d1aa755"
 
 WORKDIR /
 COPY --from=builder /workspace/controller /
-
+COPY LICENSE /licenses/
+USER 65532:65532
 ENTRYPOINT ["/controller"]
