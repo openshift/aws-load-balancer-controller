@@ -1,6 +1,8 @@
 module sigs.k8s.io/aws-load-balancer-controller
 
-go 1.22.3
+go 1.23
+
+toolchain go1.23.9
 
 require (
 	github.com/aws/aws-sdk-go v1.50.8
@@ -171,7 +173,7 @@ require (
 	k8s.io/kubectl v0.30.0 // indirect
 	moul.io/http2curl/v2 v2.3.0 // indirect
 	oras.land/oras-go v1.2.4 // indirect
-	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
+	sigs.k8s.io/json v0.0.0-20241014173422-cfa47c3a1cc8 // indirect
 	sigs.k8s.io/kustomize/api v0.13.5-0.20230601165947-6ce0bf390ce3 // indirect
 	sigs.k8s.io/kustomize/kyaml v0.14.3-0.20230601165947-6ce0bf390ce3 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.4.1 // indirect
