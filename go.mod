@@ -1,6 +1,8 @@
 module sigs.k8s.io/aws-load-balancer-controller
 
-go 1.22.3
+go 1.23.0
+
+toolchain go1.23.9
 
 require (
 	github.com/aws/aws-sdk-go v1.50.8
@@ -152,7 +154,7 @@ require (
 	golang.org/x/net v0.23.0 // indirect
 	golang.org/x/oauth2 v0.12.0 // indirect
 	golang.org/x/sync v0.6.0 // indirect
-	golang.org/x/sys v0.18.0 // indirect
+	golang.org/x/sys v0.33.0 // indirect
 	golang.org/x/term v0.18.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
 	golang.org/x/tools v0.18.0 // indirect
