@@ -1,6 +1,8 @@
 module sigs.k8s.io/aws-load-balancer-controller
 
-go 1.22.3
+go 1.23.0
+
+toolchain go1.23.9
 
 require (
 	github.com/aws/aws-sdk-go v1.50.8
@@ -16,7 +18,7 @@ require (
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.8.4
 	go.uber.org/zap v1.26.0
-	golang.org/x/time v0.3.0
+	golang.org/x/time v0.12.0
 	gomodules.xyz/jsonpatch/v2 v2.4.0
 	helm.sh/helm/v3 v3.15.0
 	k8s.io/api v0.30.0
