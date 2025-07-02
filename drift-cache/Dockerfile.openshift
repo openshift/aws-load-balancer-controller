@@ -1,4 +1,4 @@
-FROM registry.ci.openshift.org/ocp/builder:rhel-8-golang-1.22-openshift-4.17 AS builder
+FROM registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.22-openshift-4.17 AS builder
 
 WORKDIR /opt/app-root/src
 
@@ -17,6 +17,6 @@ COPY webhooks webhooks
 # Build the controller
 RUN go build -tags strictfipsruntime -mod=vendor -o controller main.go
 
-FROM registry.redhat.io/rhel8-6-els/rhel:latest
+FROM registry.access.redhat.com/ubi9/ubi:latest
 COPY --from=builder /opt/app-root/src/controller /usr/bin/controller
 ENTRYPOINT ["/usr/bin/controller"]
