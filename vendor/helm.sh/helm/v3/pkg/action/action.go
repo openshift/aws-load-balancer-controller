@@ -19,6 +19,7 @@ package action
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -95,6 +96,9 @@ type Configuration struct {
 	Capabilities *chartutil.Capabilities
 
 	Log func(string, ...interface{})
+
+	// HookOutputFunc called with container name and returns and expects writer that will receive the log output.
+	HookOutputFunc func(namespace, pod, container string) io.Writer
 }
 
 // renderResources renders the templates in a chart
@@ -122,7 +126,7 @@ func (cfg *Configuration) renderResources(ch *chart.Chart, values chartutil.Valu
 	var err2 error
 
 	// A `helm template` should not talk to the remote cluster. However, commands with the flag
-	//`--dry-run` with the value of `false`, `none`, or `server` should try to interact with the cluster.
+	// `--dry-run` with the value of `false`, `none`, or `server` should try to interact with the cluster.
 	// It may break in interesting and exotic ways because other data (e.g. discovery) is mocked.
 	if interactWithRemote && cfg.RESTClientGetter != nil {
 		restConfig, err := cfg.RESTClientGetter.ToRESTConfig()
@@ -165,7 +169,7 @@ func (cfg *Configuration) renderResources(ch *chart.Chart, values chartutil.Valu
 	// Sort hooks, manifests, and partials. Only hooks and manifests are returned,
 	// as partials are not used after renderer.Render. Empty manifests are also
 	// removed here.
-	hs, manifests, err := releaseutil.SortManifests(files, caps.APIVersions, releaseutil.InstallOrder)
+	hs, manifests, err := releaseutil.SortManifests(files, nil, releaseutil.InstallOrder)
 	if err != nil {
 		// By catching parse errors here, we can prevent bogus releases from going
 		// to Kubernetes.
@@ -330,7 +334,7 @@ func GetVersionSet(client discovery.ServerResourcesInterface) (chartutil.Version
 	}
 
 	versionMap := make(map[string]interface{})
-	versions := []string{}
+	var versions []string
 
 	// Extract the groups
 	for _, g := range groups {
@@ -411,18 +415,23 @@ func (cfg *Configuration) Init(getter genericclioptions.RESTClientGetter, namesp
 			namespace,
 		)
 		if err != nil {
-			panic(fmt.Sprintf("Unable to instantiate SQL driver: %v", err))
+			return errors.Wrap(err, "unable to instantiate SQL driver")
 		}
 		store = storage.Init(d)
 	default:
-		// Not sure what to do here.
-		panic("Unknown driver in HELM_DRIVER: " + helmDriver)
+		return errors.Errorf("unknown driver %q", helmDriver)
 	}
 
 	cfg.RESTClientGetter = getter
 	cfg.KubeClient = kc
 	cfg.Releases = store
 	cfg.Log = log
+	cfg.HookOutputFunc = func(_, _, _ string) io.Writer { return io.Discard }
 
 	return nil
+}
+
+// SetHookOutputFunc sets the HookOutputFunc on the Configuration.
+func (cfg *Configuration) SetHookOutputFunc(hookOutputFunc func(_, _, _ string) io.Writer) {
+	cfg.HookOutputFunc = hookOutputFunc
 }
