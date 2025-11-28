@@ -9,19 +9,17 @@
       "enabled": false
     },
     {
-      "description": "Enable Docker image updates for Red Hat UBI images on major version 9 in Containerfile only.",
+      "description": "Enable Docker image updates for Red Hat UBI minimal image on major version 9 in Containerfile only.",
       "matchManagers": ["dockerfile"],
       "matchFileNames": [
         "Containerfile.aws-load-balancer-controller"
       ],
       "matchDatasources": ["docker"],
       "matchPackageNames": [
-        "registry.access.redhat.com/ubi9/ubi-minimal",
-        "registry.access.redhat.com/ubi9/ubi"
+        "registry.access.redhat.com/ubi9/ubi-minimal"
       ],
       "enabled": true,
       "versioning": "redhat",
-      "allowedVersions": "/^9(\\.|$)/",
       "schedule": [
         "after 5am on tuesday"
       ]
