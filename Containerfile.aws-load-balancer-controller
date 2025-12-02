@@ -8,7 +8,7 @@ COPY Dockerfile.openshift .
 # drift-cache/Dockerfile.openshift.cached can be updated with the source contents once the Konflux version is aligned.
 RUN test "$(sha1sum Dockerfile.openshift.cached | cut -d' ' -f1)" = "$(sha1sum Dockerfile.openshift | cut -d' ' -f1)"
 
-FROM registry.access.redhat.com/ubi9/go-toolset:1.22 as builder
+FROM registry.access.redhat.com/ubi9/go-toolset:1.24 as builder
 # dummy copy to trigger the drift detection
 COPY --from=drift /app/Dockerfile.openshift.cached .
 
