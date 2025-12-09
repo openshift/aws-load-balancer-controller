@@ -1,0 +1,40 @@
+# Detect the drift from the upstream Dockerfile
+FROM registry.access.redhat.com/ubi8/ubi-minimal:latest AS drift
+WORKDIR /app
+COPY drift-cache/Dockerfile.openshift Dockerfile.openshift.cached
+COPY Dockerfile.openshift .
+# If the command below fails it means that the Dockerfile.openshift from this repository changed.
+# You have to update the Konflux Containerfile accordingly (Containerfile.aws-load-balancer-controller).
+# drift-cache/Dockerfile.openshift.cached can be updated with the source contents once the Konflux version is aligned.
+RUN test "$(sha1sum Dockerfile.openshift.cached | cut -d' ' -f1)" = "$(sha1sum Dockerfile.openshift | cut -d' ' -f1)"
+
+FROM registry.access.redhat.com/ubi8/go-toolset:1.22 as builder
+# dummy copy to trigger the drift detection
+COPY --from=drift /app/Dockerfile.openshift.cached .
+
+WORKDIR /workspace
+# Dummy RUN to create /workspace directory.
+# WORKDIR doesn't create the directory (at least for Podman).
+# Without this step, the following COPY may create /workspace
+# as root-owned (instead of go-toolset's default 1001)
+# leading to  "Permission denied" errors during "go build"
+# when trying to write output.
+RUN ls .
+COPY . .
+
+# Build
+RUN go build -tags strictfipsruntime -o controller -mod=vendor main.go
+
+FROM registry.access.redhat.com/ubi8/ubi-minimal:latest@sha256:41c6aeb7c681d89b63b35dbb8168875cd2e7b00e9ebe1d2d3d6a3c205c9dba10
+ARG FULL_COMMIT
+LABEL maintainer="Red Hat, Inc."
+LABEL com.redhat.component="aws-load-balancer-controller-container"
+LABEL name="aws-load-balancer-controller"
+LABEL version="1.2.1"
+LABEL commit=${FULL_COMMIT}
+
+WORKDIR /
+COPY --from=builder /workspace/controller /
+COPY LICENSE /licenses/
+USER 65532:65532
+ENTRYPOINT ["/controller"]
