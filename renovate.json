@@ -20,6 +20,7 @@
       ],
       "enabled": true,
       "versioning": "redhat",
+      "commitMessagePrefix": "NO-JIRA: UPSTREAM: <carry>: ",
       "schedule": [
         "after 5am on tuesday"
       ]
@@ -36,6 +37,7 @@
       ],
       "enabled": true,
       "versioning": "redhat",
+      "commitMessagePrefix": "NO-JIRA: UPSTREAM: <carry>: ",
       "allowedVersions": "/^1\\.22(\\.|$)/",
       "schedule": [
         "after 5am on tuesday"
@@ -65,6 +67,7 @@
           "branchTopic": "{{{baseBranch}}}",
           "commitMessageTopic": "{{{groupName}}}"
         },
+        "commitMessagePrefix": "NO-JIRA: UPSTREAM: <carry>: ",
         "commitMessageTopic": "Konflux references",
         "prBodyColumns": [
           "Package",
