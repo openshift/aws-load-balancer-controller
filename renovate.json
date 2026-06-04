@@ -25,7 +25,7 @@
       ]
     },
     {
-      "description": "Keep Go toolset on minor version 1.22 in Containerfile only.",
+      "description": "Keep Go toolset on minor version 1.25 in Containerfile only.",
       "matchManagers": ["dockerfile"],
       "matchFileNames": [
         "Containerfile.aws-load-balancer-controller"
@@ -36,7 +36,7 @@
       ],
       "enabled": true,
       "versioning": "redhat",
-      "allowedVersions": "/^1\\.22(\\.|$)/",
+      "allowedVersions": "/^1\\.25(\\.|$)/",
       "schedule": [
         "after 5am on tuesday"
       ]
