@@ -7,6 +7,7 @@ approvers:
   - grzpiotrowski
   - Thealisyed
   - rohara
+  - pedjak
 reviewers:
   - Miciah
   - alebedev87
@@ -16,4 +17,5 @@ reviewers:
   - grzpiotrowski
   - Thealisyed
   - rohara
+  - pedjak
 component: Ingress
