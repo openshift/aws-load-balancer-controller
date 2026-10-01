@@ -29,7 +29,8 @@ FROM registry.access.redhat.com/ubi8/ubi-minimal:latest@sha256:41c6aeb7c681d89b6
 ARG FULL_COMMIT
 LABEL maintainer="Red Hat, Inc."
 LABEL com.redhat.component="aws-load-balancer-controller-container"
-LABEL name="aws-load-balancer-controller"
+LABEL name="albo/aws-load-balancer-controller-rhel8"
+LABEL cpe="cpe:/a:redhat:aws_lb_optr:1.2::el8"
 LABEL version="1.2.1"
 LABEL commit=${FULL_COMMIT}
 
